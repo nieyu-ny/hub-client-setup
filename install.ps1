@@ -5,15 +5,22 @@
     从预编译二进制文件安装hub-agent，无需编译环境
 .PARAMETER Token
     应用程序token
+.PARAMETER Force
+    强制重新安装，覆盖已存在的服务
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token"
 .EXAMPLE
-    PowerShell -ExecutionPolicy Bypass -Command "iwr -useb https://your-domain.com/install.ps1 | iex" -Token "your_token"
+    PowerShell -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1 | iex" -Token "your_token"
+.EXAMPLE
+    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -Force
 #>
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$Token
+    [string]$Token,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Force
 )
 
 # 配置参数
@@ -34,6 +41,26 @@ function Write-Warn { Write-ColorOutput "[WARN] $args" "Yellow" }
 function Write-Error { Write-ColorOutput "[ERROR] $args" "Red"; exit 1 }
 function Write-Step { Write-ColorOutput "[STEP] $args" "Cyan" }
 
+# 显示安装信息
+function Show-InstallInfo {
+    $arch = Get-Architecture
+    
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows一键安装程序" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "安装信息:"
+    Write-Host "  操作系统: Windows"
+    Write-Host "  架构: $arch"
+    Write-Host "  二进制文件: $BinaryName"
+    Write-Host "  仓库: $RepoUrl"
+    Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
+    if ($Force) {
+        Write-Host "  强制重装: 是"
+    }
+    Write-Host ""
+}
+
 # 检查管理员权限
 function Test-AdminRights {
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -41,8 +68,38 @@ function Test-AdminRights {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-AdminRights)) {
-    Write-Error "请以管理员身份运行此脚本"
+# 自动提权重新执行脚本
+function Request-AdminElevation {
+    if (-not (Test-AdminRights)) {
+        Write-Step "检测到非管理员权限，尝试自动提权..."
+        
+        try {
+            # 构建参数
+            $scriptArgs = "-Token `"$Token`""
+            if ($Force) {
+                $scriptArgs += " -Force"
+            }
+            
+            # 如果是从URL执行的脚本，需要重新下载并执行
+            if ($MyInvocation.MyCommand.Path) {
+                # 本地文件执行
+                $scriptPath = $MyInvocation.MyCommand.Path
+                Start-Process -FilePath "PowerShell" -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" $scriptArgs" -Verb RunAs -Wait
+            } else {
+                # 通过管道执行，需要重新下载
+                Write-Info "正在以管理员权限重新执行脚本..."
+                $scriptUrl = "https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1"
+                $psCommand = "iwr -useb '$scriptUrl' | iex"
+                Start-Process -FilePath "PowerShell" -ArgumentList "-ExecutionPolicy Bypass -Command `"$psCommand`" $scriptArgs" -Verb RunAs -Wait
+            }
+            
+            Write-Info "管理员权限执行完成"
+            exit 0
+            
+        } catch {
+            Write-Error "无法获取管理员权限: $($_.Exception.Message)"
+        }
+    }
 }
 
 # 检测架构
@@ -55,6 +112,18 @@ function Get-Architecture {
     }
 }
 
+# 检查网络连接
+function Test-NetworkConnection {
+    Write-Step "检查网络连接..."
+    
+    try {
+        $response = Invoke-WebRequest -Uri $RepoUrl -Method Head -TimeoutSec 10 -UseBasicParsing
+        Write-Info "网络连接正常"
+    } catch {
+        Write-Error "无法连接到下载服务器，请检查网络连接: $($_.Exception.Message)"
+    }
+}
+
 # 安装Git（如果需要）
 function Install-Git {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -62,16 +131,15 @@ function Install-Git {
         
         # 检查是否有winget
         if (Get-Command winget -ErrorAction SilentlyContinue) {
-            winget install --id Git.Git -e --source winget --silent
+            try {
+                winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
+                Write-Info "通过winget安装Git成功"
+            } catch {
+                Write-Warn "winget安装Git失败，尝试直接下载: $($_.Exception.Message)"
+                Install-GitDirect
+            }
         } else {
-            # 下载并安装Git
-            $gitUrl = "https://github.com/git-for-windows/git/releases/latest/download/Git-2.43.0-64-bit.exe"
-            $gitInstaller = "$env:TEMP\git-installer.exe"
-            
-            Write-Info "从 $gitUrl 下载Git..."
-            Invoke-WebRequest -Uri $gitUrl -OutFile $gitInstaller -UseBasicParsing
-            Start-Process -FilePath $gitInstaller -ArgumentList "/SILENT" -Wait
-            Remove-Item $gitInstaller -Force
+            Install-GitDirect
         }
         
         # 刷新环境变量
@@ -83,6 +151,80 @@ function Install-Git {
         }
         
         Write-Info "Git安装完成"
+    } else {
+        Write-Info "Git已安装"
+    }
+}
+
+# 直接下载安装Git
+function Install-GitDirect {
+    try {
+        # 获取最新版本的Git下载链接
+        $gitReleasesUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
+        $latestRelease = Invoke-RestMethod -Uri $gitReleasesUrl -UseBasicParsing
+        $downloadUrl = ($latestRelease.assets | Where-Object { $_.name -like "*64-bit.exe" }).browser_download_url
+        
+        if (-not $downloadUrl) {
+            # 备用下载链接
+            $downloadUrl = "https://github.com/git-for-windows/git/releases/latest/download/Git-2.43.0-64-bit.exe"
+        }
+        
+        $gitInstaller = "$env:TEMP\git-installer.exe"
+        
+        Write-Info "从 $downloadUrl 下载Git..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $gitInstaller -UseBasicParsing
+        
+        Write-Info "安装Git..."
+        Start-Process -FilePath $gitInstaller -ArgumentList "/SILENT" -Wait
+        Remove-Item $gitInstaller -Force
+        
+    } catch {
+        Write-Error "Git安装失败: $($_.Exception.Message)"
+    }
+}
+
+# 停止并删除已存在的服务
+function Remove-ExistingService {
+    Write-Step "检查已存在的服务..."
+    
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingService) {
+        Write-Warn "发现已存在的服务: $ServiceName"
+        
+        if (-not $Force) {
+            $confirmation = Read-Host "服务已存在，是否覆盖安装？(y/N)"
+            if ($confirmation -ne 'y' -and $confirmation -ne 'Y') {
+                Write-Info "安装已取消"
+                exit 0
+            }
+        }
+        
+        Write-Info "停止并移除已存在的服务..."
+        
+        try {
+            if ($existingService.Status -eq 'Running') {
+                Write-Info "停止服务..."
+                Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+                Start-Sleep 3
+            }
+            
+            Write-Info "删除服务..."
+            sc.exe delete $ServiceName | Out-Null
+            Start-Sleep 2
+            
+            Write-Info "已清理旧服务"
+            
+        } catch {
+            Write-Warn "清理旧服务时出现问题: $($_.Exception.Message)"
+        }
+    }
+    
+    # 检查并停止正在运行的进程
+    $runningProcesses = Get-Process -Name $AppName -ErrorAction SilentlyContinue
+    if ($runningProcesses) {
+        Write-Info "停止正在运行的进程..."
+        $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep 2
     }
 }
 
@@ -125,6 +267,17 @@ function Install-Application {
     
     # 复制二进制文件
     $targetPath = Join-Path $InstallDir "$AppName.exe"
+    
+    # 如果目标文件存在且正在运行，先停止相关进程
+    if (Test-Path $targetPath) {
+        $runningProcesses = Get-Process | Where-Object { $_.Path -eq $targetPath } -ErrorAction SilentlyContinue
+        if ($runningProcesses) {
+            Write-Info "停止正在运行的进程..."
+            $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep 2
+        }
+    }
+    
     Copy-Item -Path $binaryPath -Destination $targetPath -Force
     
     Write-Info "应用程序安装到: $targetPath"
@@ -145,20 +298,6 @@ function Install-WindowsService {
     # 服务路径（包含参数）
     $servicePath = "`"$BinaryPath`" -token=$Token"
     
-    # 停止并删除已存在的服务
-    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($existingService) {
-        Write-Info "发现已存在的服务，正在移除..."
-        
-        if ($existingService.Status -eq 'Running') {
-            Stop-Service -Name $ServiceName -Force
-            Start-Sleep 3
-        }
-        
-        sc.exe delete $ServiceName | Out-Null
-        Start-Sleep 2
-    }
-    
     # 创建新服务
     Write-Info "创建服务: $ServiceName"
     $result = sc.exe create $ServiceName binPath= $servicePath start= auto
@@ -174,18 +313,49 @@ function Install-WindowsService {
     
     # 启动服务
     Write-Info "启动服务..."
-    Start-Service -Name $ServiceName
-    
-    # 验证服务状态
-    Start-Sleep 3
-    $service = Get-Service -Name $ServiceName
-    if ($service.Status -eq 'Running') {
+    try {
+        Start-Service -Name $ServiceName
         Write-Info "服务启动成功"
-    } else {
-        Write-Warn "服务状态: $($service.Status)"
+    } catch {
+        Write-Warn "服务启动失败: $($_.Exception.Message)"
+        Write-Info "请检查服务配置和日志"
     }
     
     Write-Info "Windows服务安装完成"
+}
+
+# 验证安装
+function Test-Installation {
+    Write-Step "验证安装..."
+    
+    Start-Sleep 5
+    
+    try {
+        $service = Get-Service -Name $ServiceName -ErrorAction Stop
+        if ($service.Status -eq 'Running') {
+            Write-Info "服务运行正常"
+            return $true
+        } else {
+            Write-Warn "服务状态: $($service.Status)"
+            
+            # 尝试重新启动服务
+            Write-Info "尝试重新启动服务..."
+            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            Start-Sleep 3
+            
+            $service = Get-Service -Name $ServiceName
+            if ($service.Status -eq 'Running') {
+                Write-Info "服务重启成功"
+                return $true
+            } else {
+                Write-Warn "服务重启失败，状态: $($service.Status)"
+                return $false
+            }
+        }
+    } catch {
+        Write-Warn "无法获取服务状态: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # 显示管理命令
@@ -202,39 +372,13 @@ function Show-ManagementCommands {
     Write-Host "  安装路径: $InstallDir" -ForegroundColor White
     Write-Host "  服务名称: $ServiceName" -ForegroundColor White
     Write-Host "  开机启动: 已启用" -ForegroundColor White
-}
-
-# 验证安装
-function Test-Installation {
-    Write-Step "验证安装..."
-    
-    Start-Sleep 3
-    
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($service -and $service.Status -eq 'Running') {
-        Write-Info "服务运行正常"
-        return $true
-    } else {
-        Write-Warn "服务可能未正常启动，请检查服务状态"
-        return $false
-    }
-}
-
-# 显示安装信息
-function Show-InstallInfo {
-    $arch = Get-Architecture
-    
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows一键安装程序" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "安装信息:"
-    Write-Host "  操作系统: Windows"
-    Write-Host "  架构: $arch"
-    Write-Host "  二进制文件: $BinaryName"
-    Write-Host "  仓库: $RepoUrl"
-    Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
+    Write-Host "卸载命令:" -ForegroundColor Yellow
+    Write-Host "  sc.exe delete $ServiceName" -ForegroundColor White
+    Write-Host "  Remove-Item `"$InstallDir`" -Recurse -Force" -ForegroundColor White
     Write-Host ""
+    Write-Host "重新安装命令:" -ForegroundColor Yellow
+    Write-Host "  iwr -useb https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1 | iex -Token `"$Token`" -Force" -ForegroundColor White
 }
 
 # 主函数
@@ -242,6 +386,11 @@ function Main {
     try {
         Show-InstallInfo
         
+        # 检查并请求管理员权限
+        Request-AdminElevation
+        
+        Test-NetworkConnection
+        Remove-ExistingService
         Install-Git
         $binaryPath = Install-Application
         Install-WindowsService -BinaryPath $binaryPath
