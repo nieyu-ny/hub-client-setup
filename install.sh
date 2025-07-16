@@ -6,6 +6,7 @@ set -e
 
 # 配置参数
 SCRIPT_BASE_URL="https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master"
+BINARY_BASE_URL="https://github.com/nieyu-ny/hub-client-setup/raw/master"
 APP_NAME="hub-agent"
 
 # 颜色输出

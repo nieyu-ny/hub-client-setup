@@ -2,7 +2,7 @@
 .SYNOPSIS
     hub-agent Windows平台一键安装脚本
 .DESCRIPTION
-    从预编译二进制文件安装hub-agent，无需编译环境
+    从预编译二进制文件安装hub-agent，使用HTTP直接下载
 .PARAMETER Token
     应用程序token
 .PARAMETER Force
@@ -25,7 +25,7 @@ param(
 
 # 配置参数
 $AppName = "hub-agent"
-$RepoUrl = "https://github.com/nieyu-ny/hub-client-setup.git"
+$BinaryBaseUrl = "https://github.com/nieyu-ny/hub-client-setup/raw/master"
 $InstallDir = "C:\Program Files\$AppName"
 $ServiceName = $AppName
 $BinaryName = "hub-agent-windows.exe"
@@ -53,7 +53,7 @@ function Show-InstallInfo {
     Write-Host "  操作系统: Windows"
     Write-Host "  架构: $arch"
     Write-Host "  二进制文件: $BinaryName"
-    Write-Host "  仓库: $RepoUrl"
+    Write-Host "  下载地址: $BinaryBaseUrl"
     Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
     if ($Force) {
         Write-Host "  强制重装: 是"
@@ -117,69 +117,11 @@ function Test-NetworkConnection {
     Write-Step "检查网络连接..."
     
     try {
-        $response = Invoke-WebRequest -Uri $RepoUrl -Method Head -TimeoutSec 10 -UseBasicParsing
+        $testUrl = "$BinaryBaseUrl/$BinaryName"
+        $response = Invoke-WebRequest -Uri $testUrl -Method Head -TimeoutSec 10 -UseBasicParsing
         Write-Info "网络连接正常"
     } catch {
-        Write-Error "无法连接到下载服务器，请检查网络连接: $($_.Exception.Message)"
-    }
-}
-
-# 安装Git（如果需要）
-function Install-Git {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Step "安装Git..."
-        
-        # 检查是否有winget
-        if (Get-Command winget -ErrorAction SilentlyContinue) {
-            try {
-                winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
-                Write-Info "通过winget安装Git成功"
-            } catch {
-                Write-Warn "winget安装Git失败，尝试直接下载: $($_.Exception.Message)"
-                Install-GitDirect
-            }
-        } else {
-            Install-GitDirect
-        }
-        
-        # 刷新环境变量
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
-        
-        # 验证安装
-        if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-            Write-Error "Git安装失败，请手动安装Git后重试"
-        }
-        
-        Write-Info "Git安装完成"
-    } else {
-        Write-Info "Git已安装"
-    }
-}
-
-# 直接下载安装Git
-function Install-GitDirect {
-    try {
-        # 获取最新版本的Git下载链接
-        $gitReleasesUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
-        $latestRelease = Invoke-RestMethod -Uri $gitReleasesUrl -UseBasicParsing
-        $downloadUrl = ($latestRelease.assets | Where-Object { $_.name -like "*64-bit.exe" }).browser_download_url
-        
-        if (-not $downloadUrl) {
-            # 备用下载链接
-            $downloadUrl = "https://github.com/git-for-windows/git/releases/latest/download/Git-2.43.0-64-bit.exe"
-        }
-        
-        $gitInstaller = "$env:TEMP\git-installer.exe"
-        
-        Write-Info "从 $downloadUrl 下载Git..."
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $gitInstaller -UseBasicParsing
-        
-        Write-Info "安装Git..."
-        Start-Process -FilePath $gitInstaller -ArgumentList "/SILENT" -Wait
-        Remove-Item $gitInstaller -Force
-        
-    } catch {
-        Write-Error "Git安装失败: $($_.Exception.Message)"
+        Write-Error "无法连接到下载服务器: $testUrl, 错误: $($_.Exception.Message)"
     }
 }
 
@@ -232,21 +174,33 @@ function Remove-ExistingService {
 function Get-Binary {
     Write-Step "下载二进制文件..."
     
-    $tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
-    $repoDir = Join-Path $tempDir "hub-client-setup"
+    $downloadUrl = "$BinaryBaseUrl/$BinaryName"
+    $tempDir = $env:TEMP
+    $binaryPath = Join-Path $tempDir $BinaryName
     
     try {
-        Set-Location $tempDir
+        Write-Info "从 $downloadUrl 下载二进制文件..."
         
-        Write-Info "克隆仓库: $RepoUrl"
-        git clone --depth 1 $RepoUrl 2>$null
+        # 使用 Invoke-WebRequest 下载文件
+        $progressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'  # 禁用进度条以提高性能
         
-        $binaryPath = Join-Path $repoDir $BinaryName
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath -UseBasicParsing -TimeoutSec 300
+        
+        $ProgressPreference = $progressPreference  # 恢复进度条设置
+        
+        # 验证文件是否下载成功
         if (-not (Test-Path $binaryPath)) {
-            throw "二进制文件不存在: $BinaryName"
+            throw "文件下载失败: $BinaryName"
         }
         
-        Write-Info "找到二进制文件: $binaryPath"
+        # 验证文件大小
+        $fileInfo = Get-Item $binaryPath
+        if ($fileInfo.Length -lt 1024) {
+            throw "下载的文件大小异常，可能下载失败"
+        }
+        
+        Write-Info "二进制文件下载完成，大小: $([math]::Round($fileInfo.Length / 1024, 2))KB"
         return $binaryPath
         
     } catch {
@@ -283,8 +237,11 @@ function Install-Application {
     Write-Info "应用程序安装到: $targetPath"
     
     # 清理临时文件
-    $tempDir = Split-Path $binaryPath -Parent | Split-Path -Parent
-    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Warn "清理临时文件失败: $($_.Exception.Message)"
+    }
     
     return $targetPath
 }
@@ -391,7 +348,6 @@ function Main {
         
         Test-NetworkConnection
         Remove-ExistingService
-        Install-Git
         $binaryPath = Install-Application
         Install-WindowsService -BinaryPath $binaryPath
         

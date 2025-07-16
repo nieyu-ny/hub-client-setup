@@ -1,15 +1,14 @@
 #!/bin/bash
 # hub-agent 跨平台智能安装脚本
-# 从预编译二进制文件安装，无需编译环境
+# 从预编译二进制文件安装，使用HTTP直接下载
 
 set -e
 
 # 配置参数
 APP_NAME="hub-agent"
-REPO_URL="https://github.com/nieyu-ny/hub-client-setup.git"
+BINARY_BASE_URL="https://github.com/nieyu-ny/hub-client-setup/raw/master"
 INSTALL_DIR_LINUX="/opt/$APP_NAME"
 INSTALL_DIR_MACOS="/usr/local/bin"
-INSTALL_DIR_WINDOWS="C:\\Program Files\\$APP_NAME"
 SERVICE_NAME="$APP_NAME"
 SERVICE_USER="$APP_NAME"
 
@@ -174,23 +173,20 @@ install_dependencies() {
     if [[ "$os" == "linux" ]]; then
         info "安装依赖包..."
         if command -v apt-get &> /dev/null; then
-            apt-get update -qq && apt-get install -y git curl wget
+            apt-get update -qq && apt-get install -y curl wget
         elif command -v yum &> /dev/null; then
-            yum install -y git curl wget
+            yum install -y curl wget
         elif command -v dnf &> /dev/null; then
-            dnf install -y git curl wget
+            dnf install -y curl wget
         elif command -v apk &> /dev/null; then
-            apk add --no-cache git curl wget
+            apk add --no-cache curl wget
         elif command -v pacman &> /dev/null; then
-            pacman -S --noconfirm git curl wget
+            pacman -S --noconfirm curl wget
         else
-            warn "无法识别包管理器，请手动安装 git, curl, wget"
+            warn "无法识别包管理器，请手动安装 curl, wget"
         fi
     elif [[ "$os" == "darwin" ]]; then
         # 检查基本工具
-        if ! command -v git &> /dev/null; then
-            error "请先安装 Git (xcode-select --install)"
-        fi
         if ! command -v curl &> /dev/null; then
             error "请先安装 curl"
         fi
@@ -200,19 +196,43 @@ install_dependencies() {
 # 下载二进制文件
 download_binary() {
     local binary_name=$(get_binary_name)
+    local download_url="${BINARY_BASE_URL}/${binary_name}"
     local temp_dir=$(mktemp -d)
-    local download_dir="$temp_dir/hub-client-setup"
+    local binary_path="$temp_dir/$binary_name"
     
-    info "下载二进制文件: $binary_name"
+    info "从 $download_url 下载二进制文件..."
     
-    cd "$temp_dir"
-    git clone --depth 1 "$REPO_URL" || error "下载失败"
-    
-    if [[ ! -f "$download_dir/$binary_name" ]]; then
-        error "二进制文件不存在: $binary_name"
+    # 尝试使用curl下载
+    if command -v curl &> /dev/null; then
+        if curl -fsSL -o "$binary_path" "$download_url"; then
+            info "使用curl下载成功"
+        else
+            error "使用curl下载失败"
+        fi
+    # 尝试使用wget下载
+    elif command -v wget &> /dev/null; then
+        if wget -q -O "$binary_path" "$download_url"; then
+            info "使用wget下载成功"
+        else
+            error "使用wget下载失败"
+        fi
+    else
+        error "需要curl或wget来下载二进制文件"
     fi
     
-    echo "$download_dir/$binary_name"
+    # 验证文件是否下载成功
+    if [[ ! -f "$binary_path" ]]; then
+        error "二进制文件下载失败: $binary_name"
+    fi
+    
+    # 验证文件大小
+    local file_size=$(stat -c%s "$binary_path" 2>/dev/null || stat -f%z "$binary_path" 2>/dev/null || echo "0")
+    if [[ "$file_size" -lt 1024 ]]; then
+        error "下载的文件大小异常，可能下载失败"
+    fi
+    
+    info "二进制文件下载完成，大小: $(($file_size / 1024))KB"
+    echo "$binary_path"
 }
 
 # Linux服务安装
@@ -403,14 +423,14 @@ show_install_info() {
     local binary_name=$(get_binary_name)
     
     echo "==============================================="
-    echo "    $APP_NAME 一键安装程序"
+    echo "    $APP_NAME Unix一键安装程序"
     echo "==============================================="
     echo ""
     echo "安装信息:"
     echo "  操作系统: $os"
     echo "  架构: $arch"
     echo "  二进制文件: $binary_name"
-    echo "  仓库: $REPO_URL"
+    echo "  下载地址: $BINARY_BASE_URL"
     echo "  Token: ${TOKEN:0:8}..."
     if [[ "$FORCE_REINSTALL" == true ]]; then
         echo "  强制重装: 是"
@@ -448,6 +468,31 @@ verify_installation() {
     fi
 }
 
+# 检查网络连接
+check_network() {
+    local binary_name=$(get_binary_name)
+    local test_url="${BINARY_BASE_URL}/${binary_name}"
+    
+    info "检查网络连接..."
+    
+    # 尝试HEAD请求测试连接
+    if command -v curl &> /dev/null; then
+        if curl -fsSL --connect-timeout 10 -I "$test_url" > /dev/null 2>&1; then
+            info "网络连接正常"
+        else
+            error "无法连接到下载服务器: $test_url"
+        fi
+    elif command -v wget &> /dev/null; then
+        if wget -q --timeout=10 --spider "$test_url" 2>/dev/null; then
+            info "网络连接正常"
+        else
+            error "无法连接到下载服务器: $test_url"
+        fi
+    else
+        warn "无法测试网络连接，继续安装..."
+    fi
+}
+
 # 主函数
 main() {
     show_install_info
@@ -457,6 +502,7 @@ main() {
     # 自动提权
     auto_elevate "$@"
     
+    check_network
     install_dependencies
     
     case $os in
