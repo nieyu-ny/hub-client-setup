@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-    hub-agent Windows平台一键安装脚本
+    hub-agent Windows平台一键安装脚本（完整修复版）
 .DESCRIPTION
     从预编译二进制文件安装hub-agent，使用HTTP直接下载
     支持命令行参数和环境变量两种方式传递Token
+    修复了服务创建和字符编码问题
 .PARAMETER Token
     应用程序token (可选，如果未提供将从环境变量读取)
 .PARAMETER Force
@@ -30,6 +31,7 @@ try {
     $OutputEncoding = [System.Text.Encoding]::UTF8
     # 设置当前进程的编码
     $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+    $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 } catch {
     # 如果设置编码失败，继续执行
 }
@@ -56,6 +58,9 @@ $InstallDir = "C:\Program Files\$AppName"
 $ServiceName = $AppName
 $BinaryName = "hub-agent-windows.exe"
 
+# 全局错误处理
+$ErrorActionPreference = "Stop"
+
 # 颜色输出函数
 function Write-ColorOutput {
     param([string]$Message, [string]$Color = "Green")
@@ -72,7 +77,7 @@ function Show-InstallInfo {
     $arch = Get-Architecture
     
     Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows 一键安装程序" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows 一键安装程序 v2.0" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "安装信息:"
@@ -108,6 +113,7 @@ function Request-AdminElevation {
                     $arguments += " -Force"
                 }
                 
+                Write-Info "启动管理员权限进程..."
                 Start-Process -FilePath "PowerShell" -ArgumentList $arguments -Verb RunAs -Wait
                 
             } else {
@@ -143,8 +149,10 @@ function Test-NetworkConnection {
         $testUrl = "$BinaryBaseUrl/$BinaryName"
         $response = Invoke-WebRequest -Uri $testUrl -Method Head -TimeoutSec 10 -UseBasicParsing
         Write-Info "网络连接正常"
+        return $true
     } catch {
         Write-Error "无法连接到下载服务器: $testUrl, 错误: $($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -154,11 +162,15 @@ function Remove-ExistingService {
     
     $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($existingService) {
-        Write-Warn "发现已存在的服务: $ServiceName"
+        Write-Warn "发现已存在的服务: $ServiceName (状态: $($existingService.Status))"
         
         if (-not $Force) {
-            $confirmation = Read-Host "服务已存在，是否覆盖安装？(y/N)"
-            if ($confirmation -ne 'y' -and $confirmation -ne 'Y') {
+            do {
+                $confirmation = Read-Host "服务已存在，是否覆盖安装？(y/N)"
+                $confirmation = $confirmation.Trim().ToLower()
+            } while ($confirmation -notin @('y', 'n', 'yes', 'no', ''))
+            
+            if ($confirmation -in @('n', 'no', '')) {
                 Write-Info "安装已取消"
                 exit 0
             }
@@ -171,15 +183,33 @@ function Remove-ExistingService {
                 Write-Info "停止服务..."
                 Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
                 Start-Sleep 3
+                
+                # 等待服务完全停止
+                $timeout = 30
+                while ((Get-Service -Name $ServiceName).Status -eq 'Running' -and $timeout -gt 0) {
+                    Start-Sleep 1
+                    $timeout--
+                }
             }
             
             Write-Info "删除服务..."
-            $result = & sc.exe delete $ServiceName 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn "删除服务时出现警告: $result"
+            # 使用多种方法尝试删除服务
+            try {
+                # 方法1: 使用sc.exe
+                $result = & sc.exe delete $ServiceName 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "sc.exe delete failed: $result"
+                }
+            } catch {
+                # 方法2: 使用WMI
+                Write-Warn "sc.exe删除失败，尝试WMI方法..."
+                $service = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
+                if ($service) {
+                    $service.Delete() | Out-Null
+                }
             }
-            Start-Sleep 2
             
+            Start-Sleep 3
             Write-Info "已清理旧服务"
             
         } catch {
@@ -207,6 +237,11 @@ function Get-Binary {
     try {
         Write-Info "从 $downloadUrl 下载二进制文件..."
         
+        # 删除可能存在的旧文件
+        if (Test-Path $binaryPath) {
+            Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
+        }
+        
         # 使用 Invoke-WebRequest 下载文件
         $progressPreference = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'  # 禁用进度条以提高性能
@@ -223,7 +258,7 @@ function Get-Binary {
         # 验证文件大小
         $fileInfo = Get-Item $binaryPath
         if ($fileInfo.Length -lt 1024) {
-            throw "下载的文件大小异常，可能下载失败"
+            throw "下载的文件大小异常（$($fileInfo.Length) 字节），可能下载失败"
         }
         
         Write-Info "二进制文件下载完成，大小: $([math]::Round($fileInfo.Length / 1024, 2))KB"
@@ -240,110 +275,201 @@ function Install-Application {
     
     Write-Step "安装应用程序..."
     
-    # 创建安装目录
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
-    
-    # 复制二进制文件
-    $targetPath = Join-Path $InstallDir "$AppName.exe"
-    
-    # 如果目标文件存在且正在运行，先停止相关进程
-    if (Test-Path $targetPath) {
-        $runningProcesses = Get-Process | Where-Object { $_.Path -eq $targetPath } -ErrorAction SilentlyContinue
-        if ($runningProcesses) {
-            Write-Info "停止正在运行的进程..."
-            $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep 2
-        }
-    }
-    
-    Copy-Item -Path $binaryPath -Destination $targetPath -Force
-    
-    Write-Info "应用程序安装到: $targetPath"
-    
-    # 清理临时文件
     try {
-        Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
+        # 创建安装目录
+        if (-not (Test-Path $InstallDir)) {
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+            Write-Info "创建安装目录: $InstallDir"
+        }
+        
+        # 复制二进制文件
+        $targetPath = Join-Path $InstallDir "$AppName.exe"
+        
+        # 如果目标文件存在且正在运行，先停止相关进程
+        if (Test-Path $targetPath) {
+            $runningProcesses = Get-Process | Where-Object { 
+                try { $_.Path -eq $targetPath } catch { $false }
+            } -ErrorAction SilentlyContinue
+            
+            if ($runningProcesses) {
+                Write-Info "停止正在运行的进程..."
+                $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep 2
+            }
+        }
+        
+        # 复制文件
+        Copy-Item -Path $binaryPath -Destination $targetPath -Force
+        
+        # 验证复制是否成功
+        if (-not (Test-Path $targetPath)) {
+            throw "文件复制失败"
+        }
+        
+        Write-Info "应用程序安装到: $targetPath"
+        
+        # 清理临时文件
+        try {
+            Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Warn "清理临时文件失败: $($_.Exception.Message)"
+        }
+        
+        return $targetPath
+        
     } catch {
-        Write-Warn "清理临时文件失败: $($_.Exception.Message)"
+        Write-Error "应用程序安装失败: $($_.Exception.Message)"
     }
-    
-    return $targetPath
 }
 
-# 创建Windows服务
+# 创建Windows服务（修复版）
 function Install-WindowsService {
     param([string]$BinaryPath)
     
     Write-Step "创建Windows服务..."
     
-    # 服务路径（包含参数）
-    $servicePath = "`"$BinaryPath`" -token=$Token"
-    
-    # 创建新服务 - 修复参数格式
-    Write-Info "创建服务: $ServiceName"
-    $result = & sc.exe create $ServiceName binPath= $servicePath start= auto 2>&1
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "服务创建失败，错误代码: $LASTEXITCODE，详细信息: $result"
+    try {
+        # 构建服务命令行
+        $servicePath = "`"$BinaryPath`" -token=`"$Token`""
+        Write-Info "创建服务: $ServiceName"
+        Write-Info "服务路径: $servicePath"
+        
+        # 方法1: 使用PowerShell New-Service (推荐)
+        $serviceCreated = $false
+        try {
+            Write-Info "使用PowerShell New-Service创建服务..."
+            New-Service -Name $ServiceName -BinaryPathName $servicePath -StartupType Automatic -Description "$AppName Service"
+            $serviceCreated = $true
+            Write-Info "PowerShell创建服务成功"
+        } catch {
+            Write-Warn "PowerShell创建服务失败: $($_.Exception.Message)"
+        }
+        
+        # 方法2: 使用sc.exe作为备选
+        if (-not $serviceCreated) {
+            Write-Info "尝试使用sc.exe创建服务..."
+            try {
+                # 使用cmd执行sc命令避免PowerShell参数解析问题
+                $scCmd = "sc create `"$ServiceName`" binPath= `"$servicePath`" start= auto"
+                $result = cmd /c $scCmd 2>&1
+                
+                if ($LASTEXITCODE -eq 0) {
+                    $serviceCreated = $true
+                    Write-Info "sc.exe创建服务成功"
+                } else {
+                    throw "sc.exe失败，退出码: $LASTEXITCODE，输出: $result"
+                }
+            } catch {
+                Write-Warn "sc.exe创建服务失败: $($_.Exception.Message)"
+            }
+        }
+        
+        # 方法3: 使用WMI作为最后备选
+        if (-not $serviceCreated) {
+            Write-Info "尝试使用WMI创建服务..."
+            try {
+                $serviceClass = Get-WmiObject -Class Win32_Service -List
+                $result = $serviceClass.Create($servicePath, $ServiceName, $ServiceName, 16, 2, "Automatic", $false, $null, $null, $null, $null, $null)
+                
+                if ($result.ReturnValue -eq 0) {
+                    $serviceCreated = $true
+                    Write-Info "WMI创建服务成功"
+                } else {
+                    throw "WMI创建服务失败，返回值: $($result.ReturnValue)"
+                }
+            } catch {
+                Write-Error "WMI创建服务失败: $($_.Exception.Message)"
+            }
+        }
+        
+        if (-not $serviceCreated) {
+            throw "所有方法都无法创建服务"
+        }
+        
+        # 设置服务描述
+        try {
+            & sc.exe description $ServiceName "$AppName Service" 2>&1 | Out-Null
+        } catch {
+            Write-Warn "设置服务描述失败: $($_.Exception.Message)"
+        }
+        
+        # 配置服务失败时的重启策略
+        try {
+            & sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
+        } catch {
+            Write-Warn "设置服务重启策略失败: $($_.Exception.Message)"
+        }
+        
+        Write-Info "Windows服务安装完成"
+        
+    } catch {
+        Write-Error "创建Windows服务失败: $($_.Exception.Message)"
     }
+}
+
+# 启动服务
+function Start-HubAgentService {
+    Write-Step "启动服务..."
     
-    # 设置服务描述
-    & sc.exe description $ServiceName "$AppName Service" | Out-Null
-    
-    # 配置服务失败时的重启策略
-    & sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-    
-    # 启动服务
-    Write-Info "启动服务..."
     try {
         Start-Service -Name $ServiceName
-        Write-Info "服务启动成功"
+        Start-Sleep 3
+        
+        $service = Get-Service -Name $ServiceName
+        if ($service.Status -eq 'Running') {
+            Write-Info "服务启动成功"
+            return $true
+        } else {
+            Write-Warn "服务状态异常: $($service.Status)"
+            return $false
+        }
     } catch {
         Write-Warn "服务启动失败: $($_.Exception.Message)"
-        Write-Info "请检查服务配置和日志"
+        return $false
     }
-    
-    Write-Info "Windows服务安装完成"
 }
 
 # 验证安装
 function Test-Installation {
     Write-Step "验证安装..."
     
-    Start-Sleep 5
-    
     try {
+        # 检查二进制文件
+        $binaryPath = Join-Path $InstallDir "$AppName.exe"
+        if (-not (Test-Path $binaryPath)) {
+            Write-Warn "二进制文件不存在: $binaryPath"
+            return $false
+        }
+        
+        # 检查服务
         $service = Get-Service -Name $ServiceName -ErrorAction Stop
+        Write-Info "服务状态: $($service.Status)"
+        Write-Info "启动类型: $($service.StartType)"
+        
         if ($service.Status -eq 'Running') {
-            Write-Info "服务运行正常"
+            Write-Info "✓ 服务运行正常"
             return $true
         } else {
-            Write-Warn "服务状态: $($service.Status)"
-            
-            # 尝试重新启动服务
-            Write-Info "尝试重新启动服务..."
-            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            Start-Sleep 3
-            
-            $service = Get-Service -Name $ServiceName
-            if ($service.Status -eq 'Running') {
-                Write-Info "服务重启成功"
+            Write-Warn "⚠ 服务未运行，尝试启动..."
+            if (Start-HubAgentService) {
                 return $true
             } else {
-                Write-Warn "服务重启失败，状态: $($service.Status)"
+                Write-Warn "服务启动失败"
                 return $false
             }
         }
     } catch {
-        Write-Warn "无法获取服务状态: $($_.Exception.Message)"
+        Write-Warn "验证安装失败: $($_.Exception.Message)"
         return $false
     }
 }
 
 # 显示管理命令
 function Show-ManagementCommands {
+    Write-Host ""
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host "    安装完成！服务管理命令" -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "服务管理命令:" -ForegroundColor Yellow
     Write-Host "  启动服务: Start-Service $ServiceName" -ForegroundColor White
@@ -358,6 +484,7 @@ function Show-ManagementCommands {
     Write-Host "  开机启动: 已启用" -ForegroundColor White
     Write-Host ""
     Write-Host "卸载命令:" -ForegroundColor Yellow
+    Write-Host "  Stop-Service $ServiceName" -ForegroundColor White
     Write-Host "  sc.exe delete $ServiceName" -ForegroundColor White
     Write-Host "  Remove-Item `"$InstallDir`" -Recurse -Force" -ForegroundColor White
     Write-Host ""
@@ -365,27 +492,49 @@ function Show-ManagementCommands {
 
 # 主函数
 function Main {
+    $startTime = Get-Date
+    
     try {
         Show-InstallInfo
         
         # 检查并请求管理员权限
         Request-AdminElevation
         
-        Test-NetworkConnection
+        # 执行安装步骤
+        if (-not (Test-NetworkConnection)) {
+            return
+        }
+        
         Remove-ExistingService
         $binaryPath = Install-Application
         Install-WindowsService -BinaryPath $binaryPath
         
-        if (Test-Installation) {
-            Write-Info "安装完成！$AppName 服务已启动并设置为开机自启动"
-        } else {
-            Write-Warn "安装可能存在问题，请检查服务状态"
+        # 启动服务
+        if (-not (Start-HubAgentService)) {
+            Write-Warn "服务启动失败，但安装已完成。请手动检查服务配置。"
         }
         
-        Show-ManagementCommands
+        # 验证安装
+        $installSuccess = Test-Installation
+        
+        $endTime = Get-Date
+        $duration = $endTime - $startTime
+        
+        if ($installSuccess) {
+            Write-Host ""
+            Write-Host "🎉 安装成功完成！" -ForegroundColor Green
+            Write-Host "总耗时: $([math]::Round($duration.TotalSeconds, 1)) 秒" -ForegroundColor Cyan
+            Show-ManagementCommands
+        } else {
+            Write-Host ""
+            Write-Host "⚠ 安装可能存在问题，请检查服务状态和日志" -ForegroundColor Yellow
+        }
         
     } catch {
-        Write-Error "安装失败: $($_.Exception.Message)"
+        Write-Host ""
+        Write-Host "❌ 安装失败: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "请检查错误信息并重试，或联系技术支持。" -ForegroundColor Yellow
+        exit 1
     }
 }
 
