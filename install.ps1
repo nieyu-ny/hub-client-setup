@@ -75,23 +75,26 @@ function Request-AdminElevation {
         
         try {
             # 构建参数
-            $scriptArgs = "-Token `"$Token`""
-            if ($Force) {
-                $scriptArgs += " -Force"
-            }
+            $scriptArgs = @()
+            $scriptArgs += "-ExecutionPolicy", "Bypass"
             
-            # 如果是从URL执行的脚本，需要重新下载并执行
             if ($MyInvocation.MyCommand.Path) {
                 # 本地文件执行
                 $scriptPath = $MyInvocation.MyCommand.Path
-                Start-Process -FilePath "PowerShell" -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" $scriptArgs" -Verb RunAs -Wait
+                $scriptArgs += "-File", "`"$scriptPath`""
             } else {
                 # 通过管道执行，需要重新下载
                 Write-Info "正在以管理员权限重新执行脚本..."
                 $scriptUrl = "https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1"
-                $psCommand = "iwr -useb '$scriptUrl' | iex"
-                Start-Process -FilePath "PowerShell" -ArgumentList "-ExecutionPolicy Bypass -Command `"$psCommand`" $scriptArgs" -Verb RunAs -Wait
+                $scriptArgs += "-Command", "(iwr -useb '$scriptUrl').Content | iex"
             }
+            
+            $scriptArgs += "-Token", "`"$Token`""
+            if ($Force) {
+                $scriptArgs += "-Force"
+            }
+            
+            Start-Process -FilePath "PowerShell" -ArgumentList $scriptArgs -Verb RunAs -Wait
             
             Write-Info "管理员权限执行完成"
             exit 0
@@ -151,7 +154,7 @@ function Remove-ExistingService {
             }
             
             Write-Info "删除服务..."
-            sc.exe delete $ServiceName | Out-Null
+            & sc.exe delete $ServiceName | Out-Null
             Start-Sleep 2
             
             Write-Info "已清理旧服务"
@@ -255,18 +258,19 @@ function Install-WindowsService {
     # 服务路径（包含参数）
     $servicePath = "`"$BinaryPath`" -token=$Token"
     
-    # 创建新服务
+    # 创建新服务 - 修复 sc.exe 命令参数格式
     Write-Info "创建服务: $ServiceName"
-    $result = sc.exe create $ServiceName binPath= $servicePath start= auto
+    $result = & sc.exe create $ServiceName binPath= $servicePath start= auto
+    
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "服务创建失败: $result"
+        Write-Error "服务创建失败，错误代码: $LASTEXITCODE"
     }
     
     # 设置服务描述
-    sc.exe description $ServiceName "$AppName Service" | Out-Null
+    & sc.exe description $ServiceName "$AppName Service" | Out-Null
     
     # 配置服务失败时的重启策略
-    sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+    & sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
     
     # 启动服务
     Write-Info "启动服务..."
