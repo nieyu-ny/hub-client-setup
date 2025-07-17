@@ -3,25 +3,51 @@
     hub-agent Windows平台一键安装脚本
 .DESCRIPTION
     从预编译二进制文件安装hub-agent，使用HTTP直接下载
+    支持命令行参数和环境变量两种方式传递Token
 .PARAMETER Token
-    应用程序token
+    应用程序token (可选，如果未提供将从环境变量读取)
 .PARAMETER Force
     强制重新安装，覆盖已存在的服务
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token"
 .EXAMPLE
-    PowerShell -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1 | iex" -Token "your_token"
+    $env:Token = "your_token"; PowerShell -ExecutionPolicy Bypass -File install.ps1
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -Force
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$false)]
     [string]$Token,
     
     [Parameter(Mandatory=$false)]
     [switch]$Force
 )
+
+# 设置控制台编码为UTF-8
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    # 设置当前进程的编码
+    $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+} catch {
+    # 如果设置编码失败，继续执行
+}
+
+# 如果没有通过参数提供Token，尝试从环境变量获取
+if ([string]::IsNullOrEmpty($Token)) {
+    $Token = $env:Token
+}
+
+# 验证Token是否存在
+if ([string]::IsNullOrEmpty($Token)) {
+    Write-Host "[ERROR] Token参数是必需的。请通过 -Token 参数或 `$env:Token 环境变量提供。" -ForegroundColor Red
+    Write-Host "用法示例:" -ForegroundColor Yellow
+    Write-Host "  PowerShell -File install.ps1 -Token `"your_token`"" -ForegroundColor White
+    Write-Host "  或者:" -ForegroundColor Yellow
+    Write-Host "  `$env:Token = `"your_token`"; PowerShell -File install.ps1" -ForegroundColor White
+    exit 1
+}
 
 # 配置参数
 $AppName = "hub-agent"
@@ -46,7 +72,7 @@ function Show-InstallInfo {
     $arch = Get-Architecture
     
     Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows一键安装程序" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows 一键安装程序" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "安装信息:"
@@ -74,27 +100,21 @@ function Request-AdminElevation {
         Write-Step "检测到非管理员权限，尝试自动提权..."
         
         try {
-            # 构建参数
-            $scriptArgs = @()
-            $scriptArgs += "-ExecutionPolicy", "Bypass"
-            
             if ($MyInvocation.MyCommand.Path) {
                 # 本地文件执行
                 $scriptPath = $MyInvocation.MyCommand.Path
-                $scriptArgs += "-File", "`"$scriptPath`""
+                $arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" -Token `"$Token`""
+                if ($Force) {
+                    $arguments += " -Force"
+                }
+                
+                Start-Process -FilePath "PowerShell" -ArgumentList $arguments -Verb RunAs -Wait
+                
             } else {
-                # 通过管道执行，需要重新下载
-                Write-Info "正在以管理员权限重新执行脚本..."
-                $scriptUrl = "https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1"
-                $scriptArgs += "-Command", "(iwr -useb '$scriptUrl').Content | iex"
+                # 通过管道执行时的处理
+                Write-Info "脚本通过管道执行，需要管理员权限才能继续安装服务"
+                Write-Error "请以管理员身份运行PowerShell后重新执行此命令"
             }
-            
-            $scriptArgs += "-Token", "`"$Token`""
-            if ($Force) {
-                $scriptArgs += "-Force"
-            }
-            
-            Start-Process -FilePath "PowerShell" -ArgumentList $scriptArgs -Verb RunAs -Wait
             
             Write-Info "管理员权限执行完成"
             exit 0
@@ -154,7 +174,10 @@ function Remove-ExistingService {
             }
             
             Write-Info "删除服务..."
-            & sc.exe delete $ServiceName | Out-Null
+            $result = & sc.exe delete $ServiceName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "删除服务时出现警告: $result"
+            }
             Start-Sleep 2
             
             Write-Info "已清理旧服务"
@@ -258,12 +281,12 @@ function Install-WindowsService {
     # 服务路径（包含参数）
     $servicePath = "`"$BinaryPath`" -token=$Token"
     
-    # 创建新服务 - 修复 sc.exe 命令参数格式
+    # 创建新服务 - 修复参数格式
     Write-Info "创建服务: $ServiceName"
-    $result = & sc.exe create $ServiceName binPath= $servicePath start= auto
+    $result = & sc.exe create $ServiceName binPath= $servicePath start= auto 2>&1
     
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "服务创建失败，错误代码: $LASTEXITCODE"
+        Write-Error "服务创建失败，错误代码: $LASTEXITCODE，详细信息: $result"
     }
     
     # 设置服务描述
@@ -338,8 +361,6 @@ function Show-ManagementCommands {
     Write-Host "  sc.exe delete $ServiceName" -ForegroundColor White
     Write-Host "  Remove-Item `"$InstallDir`" -Recurse -Force" -ForegroundColor White
     Write-Host ""
-    Write-Host "重新安装命令:" -ForegroundColor Yellow
-    Write-Host "  iwr -useb https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.ps1 | iex -Token `"$Token`" -Force" -ForegroundColor White
 }
 
 # 主函数
