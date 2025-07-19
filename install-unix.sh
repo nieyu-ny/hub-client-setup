@@ -84,21 +84,28 @@ auto_elevate() {
     if [[ $EUID -ne 0 ]]; then
         info "检测到非root权限，尝试自动提权..."
         
-        # 保存原始参数
-        local orig_args=""
+        # 获取脚本的完整路径
+        local script_path="$0"
+        if [[ ! -f "$script_path" ]]; then
+            # 如果是通过管道执行的，创建临时脚本文件
+            local temp_script=$(mktemp)
+            curl -fsSL https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install-unix.sh > "$temp_script"
+            chmod +x "$temp_script"
+            script_path="$temp_script"
+        fi
+        
+        # 重新构建参数数组
+        local args=()
         for arg in "$@"; do
-            if [[ "$arg" == *" "* ]]; then
-                orig_args="$orig_args \"$arg\""
-            else
-                orig_args="$orig_args $arg"
-            fi
+            args+=("$arg")
         done
         
         if [[ "$os" == "linux" ]]; then
             # Linux: 尝试sudo
             if command -v sudo &> /dev/null; then
                 log "使用sudo重新执行脚本..."
-                exec sudo bash "$0" $orig_args
+                # 使用数组展开避免参数解析问题
+                exec sudo -E bash "$script_path" "${args[@]}"
             else
                 error "需要root权限，但sudo不可用。请以root身份运行此脚本"
             fi
@@ -106,7 +113,7 @@ auto_elevate() {
             # macOS: 使用sudo
             if command -v sudo &> /dev/null; then
                 log "使用sudo重新执行脚本..."
-                exec sudo bash "$0" $orig_args
+                exec sudo -E bash "$script_path" "${args[@]}"
             else
                 error "需要管理员权限，但sudo不可用"
             fi
