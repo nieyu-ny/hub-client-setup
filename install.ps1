@@ -74,24 +74,25 @@ function Write-Step { Write-ColorOutput "[STEP] $args" "Cyan" }
 # 显示安装信息
 function Show-InstallInfo {
     $arch = Get-Architecture
-    
+
     Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows 一键安装程序 v3.0" -ForegroundColor Cyan
-    Write-Host "    (任务计划程序版本)" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows One-Click Installer v3.0" -ForegroundColor Cyan
+    Write-Host "    (Task Scheduler Version)" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "安装信息:"
-    Write-Host "  操作系统: Windows"
-    Write-Host "  架构: $arch"
-    Write-Host "  二进制文件: $BinaryName"
-    Write-Host "  下载地址: $BinaryBaseUrl"
+    Write-Host "Installation Info:"
+    Write-Host "  Operating System: Windows"
+    Write-Host "  Architecture: $arch"
+    Write-Host "  Binary File: $BinaryName"
+    Write-Host "  Download URL: $BinaryBaseUrl"
     Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
-    Write-Host "  安装方式: 任务计划程序"
+    Write-Host "  Installation Method: Task Scheduler"
     if ($Force) {
-        Write-Host "  强制重装: 是"
+        Write-Host "  Force Reinstall: Yes"
     }
     Write-Host ""
 }
+
 
 # 检查管理员权限
 function Test-AdminRights {
@@ -103,8 +104,8 @@ function Test-AdminRights {
 # 自动提权重新执行脚本
 function Request-AdminElevation {
     if (-not (Test-AdminRights)) {
-        Write-Step "检测到非管理员权限，尝试自动提权..."
-        
+        Write-Step "Non-administrator privileges detected, attempting elevation..."
+
         try {
             if ($MyInvocation.MyCommand.Path) {
                 $scriptPath = $MyInvocation.MyCommand.Path
@@ -112,23 +113,24 @@ function Request-AdminElevation {
                 if ($Force) {
                     $arguments += " -Force"
                 }
-                
-                Write-Info "启动管理员权限进程..."
+
+                Write-Info "Launching process with administrator privileges..."
                 Start-Process -FilePath "PowerShell" -ArgumentList $arguments -Verb RunAs -Wait
-                
+
             } else {
-                Write-Info "脚本通过管道执行，需要管理员权限才能继续安装"
-                Write-Error "请以管理员身份运行PowerShell后重新执行此命令"
+                Write-Info "Script is running via pipeline; administrator privileges are required to continue installation."
+                Write-Error "Please run PowerShell as Administrator and re-execute this command."
             }
-            
-            Write-Info "管理员权限执行完成"
+
+            Write-Info "Execution with administrator privileges completed."
             exit 0
-            
+
         } catch {
-            Write-Error "无法获取管理员权限: $($_.Exception.Message)"
+            Write-Error "Failed to acquire administrator privileges: $($_.Exception.Message)"
         }
     }
 }
+
 
 # 检测架构
 function Get-Architecture {
@@ -142,72 +144,72 @@ function Get-Architecture {
 
 # 检查网络连接
 function Test-NetworkConnection {
-    Write-Step "检查网络连接..."
-    
+    Write-Step "Checking network connection..."
+
     try {
         $testUrl = "$BinaryBaseUrl/$BinaryName"
         $response = Invoke-WebRequest -Uri $testUrl -Method Head -TimeoutSec 10 -UseBasicParsing
-        Write-Info "网络连接正常"
+        Write-Info "Network connection is normal."
         return $true
     } catch {
-        Write-Error "无法连接到下载服务器: $testUrl, 错误: $($_.Exception.Message)"
+        Write-Error "Failed to connect to the download server: $testUrl, Error: $($_.Exception.Message)"
         return $false
     }
 }
 
 # 清理已存在的服务和任务
 function Remove-ExistingInstallation {
-    Write-Step "清理已存在的安装..."
-    
+    Write-Step "Cleaning up existing installation..."
+
     # 检查并清理Windows服务
     $existingService = Get-Service -Name $AppName -ErrorAction SilentlyContinue
     if ($existingService) {
-        Write-Warn "发现已存在的Windows服务: $AppName"
-        
+        Write-Warn "Existing Windows service found: $AppName"
+
         if (-not $Force) {
             do {
-                $confirmation = Read-Host "发现旧版本安装，是否覆盖安装？(y/N)"
+                $confirmation = Read-Host "An existing installation was found. Overwrite? (y/N)"
                 $confirmation = $confirmation.Trim().ToLower()
             } while ($confirmation -notin @('y', 'n', 'yes', 'no', ''))
-            
+
             if ($confirmation -in @('n', 'no', '')) {
-                Write-Info "安装已取消"
+                Write-Info "Installation cancelled."
                 exit 0
             }
         }
-        
+
         try {
             if ($existingService.Status -eq 'Running') {
-                Write-Info "停止Windows服务..."
+                Write-Info "Stopping Windows service..."
                 Stop-Service -Name $AppName -Force -ErrorAction SilentlyContinue
                 Start-Sleep 3
             }
-            
-            Write-Info "删除Windows服务..."
+
+            Write-Info "Deleting Windows service..."
             & sc.exe delete $AppName 2>&1 | Out-Null
             Start-Sleep 2
-            Write-Info "已清理Windows服务"
+            Write-Info "Windows service cleaned up."
         } catch {
-            Write-Warn "清理Windows服务时出现问题: $($_.Exception.Message)"
+            Write-Warn "An error occurred while cleaning up the Windows service: $($_.Exception.Message)"
         }
     }
-    
+
     # 检查并清理任务计划程序任务
     $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existingTask) {
-        Write-Info "发现已存在的任务计划: $TaskName"
+        Write-Info "Existing scheduled task found: $TaskName"
         try {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Info "已清理任务计划"
+            Write-Info "Scheduled task cleaned up."
         } catch {
-            Write-Warn "清理任务计划时出现问题: $($_.Exception.Message)"
+            Write-Warn "An error occurred while cleaning up the scheduled task: $($_.Exception.Message)"
         }
     }
-    
+
     # 停止正在运行的进程
     $runningProcesses = Get-Process -Name $AppName -ErrorAction SilentlyContinue
     if ($runningProcesses) {
-        Write-Info "停止正在运行的进程..."
+        Write-Info "Stopping running processes..."
         $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep 2
     }
@@ -215,181 +217,181 @@ function Remove-ExistingInstallation {
 
 # 下载二进制文件
 function Get-Binary {
-    Write-Step "下载二进制文件..."
-    
+    Write-Step "Downloading binary file..."
+
     $downloadUrl = "$BinaryBaseUrl/$BinaryName"
     $tempDir = $env:TEMP
     $binaryPath = Join-Path $tempDir $BinaryName
-    
+
     try {
-        Write-Info "从 $downloadUrl 下载二进制文件..."
-        
+        Write-Info "Downloading binary from $downloadUrl..."
+
         if (Test-Path $binaryPath) {
             Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
         }
-        
+
         $progressPreference = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
-        
+
         Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath -UseBasicParsing -TimeoutSec 300
-        
+
         $ProgressPreference = $progressPreference
-        
+
         if (-not (Test-Path $binaryPath)) {
-            throw "文件下载失败: $BinaryName"
+            throw "File download failed: $BinaryName"
         }
-        
+
         $fileInfo = Get-Item $binaryPath
         if ($fileInfo.Length -lt 1024) {
-            throw "下载的文件大小异常（$($fileInfo.Length) 字节），可能下载失败"
+            throw "Downloaded file size is abnormal ($($fileInfo.Length) bytes), possibly failed."
         }
-        
-        Write-Info "二进制文件下载完成，大小: $([math]::Round($fileInfo.Length / 1024, 2))KB"
+
+        Write-Info "Binary downloaded successfully, size: $([math]::Round($fileInfo.Length / 1024, 2))KB"
         return $binaryPath
-        
+
     } catch {
-        Write-Error "下载失败: $($_.Exception.Message)"
+        Write-Error "Download failed: $($_.Exception.Message)"
     }
 }
 
 # 安装应用程序
 function Install-Application {
     $binaryPath = Get-Binary
-    
-    Write-Step "安装应用程序..."
-    
+
+    Write-Step "Installing application..."
+
     try {
         if (-not (Test-Path $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-            Write-Info "创建安装目录: $InstallDir"
+            Write-Info "Created installation directory: $InstallDir"
         }
-        
+
         $targetPath = Join-Path $InstallDir "$AppName.exe"
-        
+
         if (Test-Path $targetPath) {
             $runningProcesses = Get-Process | Where-Object { 
                 try { $_.Path -eq $targetPath } catch { $false }
             } -ErrorAction SilentlyContinue
-            
+
             if ($runningProcesses) {
-                Write-Info "停止正在运行的进程..."
+                Write-Info "Stopping running processes..."
                 $runningProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
                 Start-Sleep 2
             }
         }
-        
+
         Copy-Item -Path $binaryPath -Destination $targetPath -Force
-        
+
         if (-not (Test-Path $targetPath)) {
-            throw "文件复制失败"
+            throw "File copy failed"
         }
-        
-        Write-Info "应用程序安装到: $targetPath"
-        
+
+        Write-Info "Application installed at: $targetPath"
+
         try {
             Remove-Item $binaryPath -Force -ErrorAction SilentlyContinue
         } catch {
-            Write-Warn "清理临时文件失败: $($_.Exception.Message)"
+            Write-Warn "Failed to clean up temporary file: $($_.Exception.Message)"
         }
-        
+
         return $targetPath
-        
+
     } catch {
-        Write-Error "应用程序安装失败: $($_.Exception.Message)"
+        Write-Error "Application installation failed: $($_.Exception.Message)"
     }
 }
 
 # 创建任务计划程序任务
 function Install-ScheduledTask {
     param([string]$BinaryPath)
-    
-    Write-Step "创建任务计划程序任务..."
-    
+
+    Write-Step "Creating scheduled task..."
+
     try {
-        Write-Info "配置任务计划: $TaskName"
-        Write-Info "程序路径: $BinaryPath"
+        Write-Info "Configuring scheduled task: $TaskName"
+        Write-Info "Executable path: $BinaryPath"
         Write-Info "Token: $($Token.Substring(0, 8))..."
-        
+
         # 创建任务触发器 - 系统启动时
         $trigger = New-ScheduledTaskTrigger -AtStartup
-        
+
         # 创建任务动作
         $action = New-ScheduledTaskAction -Execute $BinaryPath -Argument "-token `"$Token`""
-        
+
         # 创建任务主体设置 - 以SYSTEM权限运行
         $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        
+
         # 创建任务设置
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
-        
+
         # 注册任务
         Register-ScheduledTask -TaskName $TaskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "$AppName Service (Managed by Task Scheduler)"
-        
-        Write-Info "任务计划创建成功"
+
+        Write-Info "Scheduled task created successfully."
         return $true
-        
+
     } catch {
-        Write-Error "创建任务计划失败: $($_.Exception.Message)"
+        Write-Error "Failed to create scheduled task: $($_.Exception.Message)"
         return $false
     }
 }
 
 # 启动任务
 function Start-HubAgentTask {
-    Write-Step "启动任务..."
-    
+    Write-Step "Starting task..."
+
     try {
         Start-ScheduledTask -TaskName $TaskName
         Start-Sleep 3
-        
+
         $task = Get-ScheduledTask -TaskName $TaskName
         $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
-        
+
         if ($process) {
-            Write-Info "任务启动成功，进程正在运行 (PID: $($process.Id))"
+            Write-Info "Task started successfully, process is running (PID: $($process.Id))"
             return $true
         } else {
-            Write-Warn "任务已启动但进程未找到"
+            Write-Warn "Task started but process not found"
             return $false
         }
     } catch {
-        Write-Warn "任务启动失败: $($_.Exception.Message)"
+        Write-Warn "Failed to start task: $($_.Exception.Message)"
         return $false
     }
 }
 
 # 验证安装
 function Test-Installation {
-    Write-Step "验证安装..."
-    
+    Write-Step "Verifying installation..."
+
     try {
         # 检查二进制文件
         $binaryPath = Join-Path $InstallDir "$AppName.exe"
         if (-not (Test-Path $binaryPath)) {
-            Write-Warn "二进制文件不存在: $binaryPath"
+            Write-Warn "Binary file does not exist: $binaryPath"
             return $false
         }
-        
+
         # 检查任务
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-Info "任务状态: $($task.State)"
-        
+        Write-Info "Task status: $($task.State)"
+
         # 检查进程
         $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
         if ($process) {
-            Write-Info "✓ 进程运行正常 (PID: $($process.Id))"
+            Write-Info "✓ Process is running normally (PID: $($process.Id))"
             return $true
         } else {
-            Write-Warn "⚠ 进程未运行，尝试启动..."
+            Write-Warn "⚠ Process is not running, attempting to start..."
             if (Start-HubAgentTask) {
                 return $true
             } else {
-                Write-Warn "任务启动失败"
+                Write-Warn "Failed to start task"
                 return $false
             }
         }
     } catch {
-        Write-Warn "验证安装失败: $($_.Exception.Message)"
+        Write-Warn "Installation verification failed: $($_.Exception.Message)"
         return $false
     }
 }
@@ -398,33 +400,33 @@ function Test-Installation {
 function Show-ManagementCommands {
     Write-Host ""
     Write-Host "===============================================" -ForegroundColor Green
-    Write-Host "    安装完成！管理命令" -ForegroundColor Green
+    Write-Host "    Installation Complete! Management Commands" -ForegroundColor Green
     Write-Host "===============================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "任务管理命令:" -ForegroundColor Yellow
-    Write-Host "  查看状态: Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor White
-    Write-Host "  启动任务: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
-    Write-Host "  停止进程: Stop-Process -Name $AppName -Force" -ForegroundColor White
-    Write-Host "  重启服务: Stop-Process -Name $AppName -Force; Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
-    Write-Host "  禁用任务: Disable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
-    Write-Host "  启用任务: Enable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "Task Management Commands:" -ForegroundColor Yellow
+    Write-Host "  Check status: Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor White
+    Write-Host "  Start task: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Stop process: Stop-Process -Name $AppName -Force" -ForegroundColor White
+    Write-Host "  Restart service: Stop-Process -Name $AppName -Force; Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Disable task: Disable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Enable task: Enable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
     Write-Host ""
-    Write-Host "进程管理命令:" -ForegroundColor Yellow
-    Write-Host "  查看进程: Get-Process -Name $AppName" -ForegroundColor White
-    Write-Host "  进程详情: Get-Process -Name $AppName | Format-List *" -ForegroundColor White
+    Write-Host "Process Management Commands:" -ForegroundColor Yellow
+    Write-Host "  View process: Get-Process -Name $AppName" -ForegroundColor White
+    Write-Host "  Process details: Get-Process -Name $AppName | Format-List *" -ForegroundColor White
     Write-Host ""
-    Write-Host "日志查询命令:" -ForegroundColor Yellow
-    Write-Host "  任务日志: Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'} -MaxEvents 10 | Where-Object {`$_.Message -match '$TaskName'}" -ForegroundColor White
-    Write-Host "  系统日志: Get-EventLog -LogName System -Newest 10 | Where-Object {`$_.Message -match '$AppName'}" -ForegroundColor White
+    Write-Host "Log Query Commands:" -ForegroundColor Yellow
+    Write-Host "  Task logs: Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'} -MaxEvents 10 | Where-Object {`$_.Message -match '$TaskName'}" -ForegroundColor White
+    Write-Host "  System logs: Get-EventLog -LogName System -Newest 10 | Where-Object {`$_.Message -match '$AppName'}" -ForegroundColor White
     Write-Host ""
-    Write-Host "安装配置:" -ForegroundColor Yellow
-    Write-Host "  安装路径: $InstallDir" -ForegroundColor White
-    Write-Host "  任务名称: $TaskName" -ForegroundColor White
-    Write-Host "  开机启动: ✓ 已启用" -ForegroundColor Green
-    Write-Host "  运行权限: SYSTEM" -ForegroundColor White
-    Write-Host "  故障重启: ✓ 已启用 (5分钟后重试，最多3次)" -ForegroundColor Green
+    Write-Host "Installation Info:" -ForegroundColor Yellow
+    Write-Host "  Install path: $InstallDir" -ForegroundColor White
+    Write-Host "  Task name: $TaskName" -ForegroundColor White
+    Write-Host "  Startup on boot: ✓ Enabled" -ForegroundColor Green
+    Write-Host "  Run as: SYSTEM" -ForegroundColor White
+    Write-Host "  Restart on failure: ✓ Enabled (Retry in 5 minutes, up to 3 times)" -ForegroundColor Green
     Write-Host ""
-    Write-Host "完全卸载命令:" -ForegroundColor Red
+    Write-Host "Full Uninstall Commands:" -ForegroundColor Red
     Write-Host "  Stop-Process -Name $AppName -Force -ErrorAction SilentlyContinue" -ForegroundColor White
     Write-Host "  Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false" -ForegroundColor White
     Write-Host "  Remove-Item `"$InstallDir`" -Recurse -Force" -ForegroundColor White
@@ -434,51 +436,51 @@ function Show-ManagementCommands {
 # 主函数
 function Main {
     $startTime = Get-Date
-    
+
     try {
         Show-InstallInfo
-        
-        # 检查并请求管理员权限
+
+        # Check and request administrator privileges
         Request-AdminElevation
-        
-        # 执行安装步骤
+
+        # Execute installation steps
         if (-not (Test-NetworkConnection)) {
             return
         }
-        
+
         Remove-ExistingInstallation
         $binaryPath = Install-Application
-        
+
         if (-not (Install-ScheduledTask -BinaryPath $binaryPath)) {
-            Write-Error "任务计划创建失败"
+            Write-Error "Failed to create scheduled task"
             return
         }
-        
-        # 启动任务
+
+        # Start task
         if (-not (Start-HubAgentTask)) {
-            Write-Warn "任务启动失败，但安装已完成。请手动检查任务配置。"
+            Write-Warn "Task failed to start, but installation is complete. Please manually check the task configuration."
         }
-        
-        # 验证安装
+
+        # Verify installation
         $installSuccess = Test-Installation
-        
+
         $endTime = Get-Date
         $duration = $endTime - $startTime
-        
+
         if ($installSuccess) {
             Write-Host ""
-            Write-Host "🎉 安装成功完成！" -ForegroundColor Green
-            Write-Host "总耗时: $([math]::Round($duration.TotalSeconds, 1)) 秒" -ForegroundColor Cyan
+            Write-Host "🎉 Installation completed successfully!" -ForegroundColor Green
+            Write-Host "Total time elapsed: $([math]::Round($duration.TotalSeconds, 1)) seconds" -ForegroundColor Cyan
             Show-ManagementCommands
         } else {
             Write-Host ""
-            Write-Host "⚠ 安装可能存在问题，请检查任务状态和日志" -ForegroundColor Yellow
+            Write-Host "⚠ There may be issues with the installation. Please check the task status and logs." -ForegroundColor Yellow
         }
-        
+
     } catch {
         Write-Host ""
-        Write-Host "❌ 安装失败: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "请检查错误信息并重试，或联系技术支持。" -ForegroundColor Yellow
+        Write-Host "❌ Installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Please check the error message and try again, or contact technical support." -ForegroundColor Yellow
         exit 1
     }
 }
