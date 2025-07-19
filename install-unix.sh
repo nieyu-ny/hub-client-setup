@@ -6,7 +6,7 @@ set -e
 
 # 配置参数
 APP_NAME="hub-agent"
-BINARY_BASE_URL="https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master"
+BINARY_BASE_URL="https://github.com/nieyu-ny/hub-client-setup/raw/master"
 INSTALL_DIR_LINUX="/opt/$APP_NAME"
 INSTALL_DIR_MACOS="/usr/local/bin"
 SERVICE_NAME="$APP_NAME"
@@ -84,21 +84,17 @@ auto_elevate() {
     if [[ $EUID -ne 0 ]]; then
         info "检测到非root权限，尝试自动提权..."
         
-        # 获取脚本的完整路径和参数
-        local script_path="$0"
-        local args=()
-        
-        # 重新构建参数数组
+        # 保存原始参数
+        local orig_args=()
         for arg in "$@"; do
-            args+=("$arg")
+            orig_args+=("$arg")
         done
         
         if [[ "$os" == "linux" ]]; then
             # Linux: 尝试sudo
             if command -v sudo &> /dev/null; then
                 log "使用sudo重新执行脚本..."
-                # 使用数组展开避免参数解析问题
-                exec sudo -E bash "$script_path" "${args[@]}"
+                exec sudo -E bash "$0" "${orig_args[@]}"
             else
                 error "需要root权限，但sudo不可用。请以root身份运行此脚本"
             fi
@@ -106,7 +102,7 @@ auto_elevate() {
             # macOS: 使用sudo
             if command -v sudo &> /dev/null; then
                 log "使用sudo重新执行脚本..."
-                exec sudo -E bash "$script_path" "${args[@]}"
+                exec sudo -E bash "$0" "${orig_args[@]}"
             else
                 error "需要管理员权限，但sudo不可用"
             fi
