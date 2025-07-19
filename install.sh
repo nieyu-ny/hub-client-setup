@@ -142,7 +142,7 @@ install_unix() {
     info "检测到 $os 平台，使用Unix安装脚本..."
     
     # 构建参数
-    local install_args="-token=$TOKEN"
+    local install_args="-token=\"$TOKEN\""
     if [[ "$FORCE_REINSTALL" == true ]]; then
         install_args="$install_args --force"
     fi
@@ -151,9 +151,9 @@ install_unix() {
     local script_url="${SCRIPT_BASE_URL}/install-unix.sh"
     
     if command -v curl &> /dev/null; then
-        curl -fsSL "$script_url" | bash -s -- $install_args
+        curl -fsSL "$script_url" | sudo bash -s -- -token="$TOKEN" $EXTRA_ARGS
     elif command -v wget &> /dev/null; then
-        wget -qO- "$script_url" | bash -s -- $install_args
+        wget -qO- "$script_url" | sudo bash -s -- -token="$TOKEN" $EXTRA_ARGS
     else
         error "需要 curl 或 wget 来下载安装脚本"
     fi
