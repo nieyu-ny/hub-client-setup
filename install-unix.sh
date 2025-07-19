@@ -84,18 +84,11 @@ auto_elevate() {
     if [[ $EUID -ne 0 ]]; then
         info "检测到非root权限，尝试自动提权..."
         
-        # 获取脚本的完整路径
+        # 获取脚本的完整路径和参数
         local script_path="$0"
-        if [[ ! -f "$script_path" ]]; then
-            # 如果是通过管道执行的，创建临时脚本文件
-            local temp_script=$(mktemp)
-            curl -fsSL https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install-unix.sh > "$temp_script"
-            chmod +x "$temp_script"
-            script_path="$temp_script"
-        fi
+        local args=()
         
         # 重新构建参数数组
-        local args=()
         for arg in "$@"; do
             args+=("$arg")
         done
@@ -200,45 +193,50 @@ install_dependencies() {
     fi
 }
 
-# 下载二进制文件
+# 下载二进制文件 - 修复版本
 download_binary() {
     local binary_name=$(get_binary_name)
     local download_url="${BINARY_BASE_URL}/${binary_name}"
     local temp_dir=$(mktemp -d)
     local binary_path="$temp_dir/$binary_name"
     
-    info "从 $download_url 下载二进制文件..."
-    
-    # 尝试使用curl下载
-    if command -v curl &> /dev/null; then
-        if curl -fsSL -o "$binary_path" "$download_url"; then
-            info "使用curl下载成功"
+    # 将所有信息输出重定向到stderr，避免干扰函数返回值
+    {
+        info "从 $download_url 下载二进制文件..."
+        
+        # 尝试使用curl下载
+        if command -v curl &> /dev/null; then
+            if curl -fsSL -o "$binary_path" "$download_url"; then
+                info "使用curl下载成功"
+            else
+                error "使用curl下载失败"
+            fi
+        # 尝试使用wget下载
+        elif command -v wget &> /dev/null; then
+            if wget -q -O "$binary_path" "$download_url"; then
+                info "使用wget下载成功"
+            else
+                error "使用wget下载失败"
+            fi
         else
-            error "使用curl下载失败"
+            error "需要curl或wget来下载二进制文件"
         fi
-    # 尝试使用wget下载
-    elif command -v wget &> /dev/null; then
-        if wget -q -O "$binary_path" "$download_url"; then
-            info "使用wget下载成功"
-        else
-            error "使用wget下载失败"
+        
+        # 验证文件是否下载成功
+        if [[ ! -f "$binary_path" ]]; then
+            error "二进制文件下载失败: $binary_name"
         fi
-    else
-        error "需要curl或wget来下载二进制文件"
-    fi
+        
+        # 验证文件大小
+        local file_size=$(stat -c%s "$binary_path" 2>/dev/null || stat -f%z "$binary_path" 2>/dev/null || echo "0")
+        if [[ "$file_size" -lt 1024 ]]; then
+            error "下载的文件大小异常，可能下载失败"
+        fi
+        
+        info "二进制文件下载完成，大小: $(($file_size / 1024))KB"
+    } >&2
     
-    # 验证文件是否下载成功
-    if [[ ! -f "$binary_path" ]]; then
-        error "二进制文件下载失败: $binary_name"
-    fi
-    
-    # 验证文件大小
-    local file_size=$(stat -c%s "$binary_path" 2>/dev/null || stat -f%z "$binary_path" 2>/dev/null || echo "0")
-    if [[ "$file_size" -lt 1024 ]]; then
-        error "下载的文件大小异常，可能下载失败"
-    fi
-    
-    info "二进制文件下载完成，大小: $(($file_size / 1024))KB"
+    # 只将文件路径输出到stdout作为返回值
     echo "$binary_path"
 }
 
