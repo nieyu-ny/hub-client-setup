@@ -6,7 +6,7 @@ set -e
 
 # 配置参数
 APP_NAME="hub-agent"
-BINARY_BASE_URL="https://github.com/nieyu-ny/hub-client-setup/raw/master"
+BINARY_BASE_URL="https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master"
 INSTALL_DIR_LINUX="/opt/$APP_NAME"
 INSTALL_DIR_MACOS="/usr/local/bin"
 SERVICE_NAME="$APP_NAME"
