@@ -10,7 +10,6 @@ BINARY_BASE_URL="https://github.com/nieyu-ny/hub-client-setup/raw/master"
 INSTALL_DIR_LINUX="/opt/$APP_NAME"
 INSTALL_DIR_MACOS="/usr/local/bin"
 SERVICE_NAME="$APP_NAME"
-SERVICE_USER="$APP_NAME"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -246,14 +245,6 @@ setup_linux_service() {
     # 停止并清理已存在的服务
     stop_existing_service
     
-    # 创建用户
-    if ! id "$SERVICE_USER" &>/dev/null; then
-        useradd -r -s /bin/false -d "$INSTALL_DIR_LINUX" "$SERVICE_USER"
-        log "创建服务用户: $SERVICE_USER"
-    else
-        log "服务用户已存在: $SERVICE_USER"
-    fi
-    
     # 创建目录并复制文件
     mkdir -p "$INSTALL_DIR_LINUX"
     
@@ -266,7 +257,6 @@ setup_linux_service() {
     
     cp "$binary_path" "$install_path"
     chmod +x "$install_path"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR_LINUX"
     
     # 创建systemd服务
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -277,8 +267,6 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR_LINUX
 ExecStart=$install_path -token=$TOKEN
 ExecReload=/bin/kill -HUP \$MAINPID
@@ -399,7 +387,6 @@ show_management_commands() {
         echo ""
         echo "服务信息:"
         echo "  安装路径: $INSTALL_DIR_LINUX"
-        echo "  服务用户: $SERVICE_USER"
     elif [[ "$os" == "darwin" ]]; then
         echo "  启动服务: sudo launchctl start com.${APP_NAME}"
         echo "  停止服务: sudo launchctl stop com.${APP_NAME}"
