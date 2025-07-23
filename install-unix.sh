@@ -276,13 +276,6 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=$APP_NAME
 
-# 安全设置
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$INSTALL_DIR_LINUX
-
 [Install]
 WantedBy=multi-user.target
 EOF
