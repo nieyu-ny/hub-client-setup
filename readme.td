@@ -7,3 +7,5 @@ curl -fsSL https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/in
 sudo bash -c "curl -fsSL https://raw.githubusercontent.com/nieyu-ny/hub-client-setup/master/install.sh | bash -s -- -token=MyHUjM+kdqg3UVU50841PqhDXaY/nL4ffguwI/sEz+A="
 
 sudo journalctl -u hub-agent -f --no-pager -l
+
+journalctl -u hub-agent -f
