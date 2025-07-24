@@ -1,22 +1,16 @@
 <#
 .SYNOPSIS
-    hub-agent Windows平台一键安装脚本（任务计划程序版本 - 稳定日志版 v3.1-Final）
+    hub-agent Windows平台一键安装脚本（任务计划程序版本 - 终极稳定版 v3.2）
 .DESCRIPTION
     从预编译二进制文件安装hub-agent，使用任务计划程序替代Windows服务
     支持命令行参数和环境变量两种方式传递Token
-    通过PowerShell重定向实现日志记录和轮转功能（已修复参数传递问题）
+    使用批处理文件实现简单可靠的日志记录
 .PARAMETER Token
     应用程序token (可选，如果未提供将从环境变量读取)
 .PARAMETER LogPath
     日志文件路径 (可选，默认: C:\ProgramData\hub-agent\logs\hub-agent.log)
-.PARAMETER MaxLogSizeMB
-    单个日志文件最大大小（MB），默认: 10MB
-.PARAMETER MaxLogFiles
-    保留的日志文件数量，默认: 5个
 .PARAMETER Force
     强制重新安装，覆盖已存在的任务
-.EXAMPLE
-    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token"
 .EXAMPLE
     $env:Token = "your_token"; iwr -useb https://url/install.ps1 | iex
 #>
@@ -27,12 +21,6 @@ param(
 
     [Parameter(Mandatory=$false)]
     [string]$LogPath = "C:\ProgramData\hub-agent\logs\hub-agent.log",
-
-    [Parameter(Mandatory=$false)]
-    [int]$MaxLogSizeMB = 10,
-
-    [Parameter(Mandatory=$false)]
-    [int]$MaxLogFiles = 5,
 
     [Parameter(Mandatory=$false)]
     [switch]$Force
@@ -57,7 +45,6 @@ if ([string]::IsNullOrEmpty($Token)) {
 if ([string]::IsNullOrEmpty($Token)) {
     Write-Host "[ERROR] Token参数是必需的。请通过 -Token 参数或 `$env:Token 环境变量提供。" -ForegroundColor Red
     Write-Host "用法示例:" -ForegroundColor Yellow
-    Write-Host "  PowerShell -File install.ps1 -Token `"your_token`"" -ForegroundColor White
     Write-Host "  `$env:Token = `"your_token`"; iwr -useb https://url/install.ps1 | iex" -ForegroundColor White
     exit 1
 }
@@ -95,8 +82,8 @@ function Show-InstallInfo {
     $arch = Get-Architecture
 
     Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows Installer v3.1-Final" -ForegroundColor Cyan
-    Write-Host "    (Task Scheduler + Logging - Stable)" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows Installer v3.2-Ultimate" -ForegroundColor Cyan
+    Write-Host "    (Task Scheduler + Simple Logging)" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Installation Info:"
@@ -105,10 +92,8 @@ function Show-InstallInfo {
     Write-Host "  Binary File: $BinaryName"
     Write-Host "  Download URL: $BinaryBaseUrl"
     Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
-    Write-Host "  Installation Method: Task Scheduler with PowerShell Wrapper"
+    Write-Host "  Installation Method: Task Scheduler + Batch Script"
     Write-Host "  Log Path: $LogPath"
-    Write-Host "  Max Log Size: ${MaxLogSizeMB}MB"
-    Write-Host "  Max Log Files: $MaxLogFiles"
     if ($Force) {
         Write-Host "  Force Reinstall: Yes"
     }
@@ -130,7 +115,7 @@ function Request-AdminElevation {
         try {
             if ($MyInvocation.MyCommand.Path) {
                 $scriptPath = $MyInvocation.MyCommand.Path
-                $arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" -Token `"$Token`" -LogPath `"$LogPath`" -MaxLogSizeMB $MaxLogSizeMB -MaxLogFiles $MaxLogFiles"
+                $arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" -Token `"$Token`" -LogPath `"$LogPath`""
                 if ($Force) {
                     $arguments += " -Force"
                 }
@@ -177,7 +162,7 @@ function Test-NetworkConnection {
     }
 }
 
-# 创建日志配置和包装脚本
+# 创建日志配置和启动批处理文件
 function Initialize-LoggingConfiguration {
     Write-Step "Initializing logging configuration..."
 
@@ -194,153 +179,52 @@ function Initialize-LoggingConfiguration {
         $acl.SetAccessRule($accessRule)
         Set-Acl -Path $LogDir -AclObject $acl
 
-        # 创建包装脚本（修复版本）
-        $wrapperScript = @"
-# hub-agent 启动包装脚本 - 支持日志轮转 (Fixed Version)
-param(
-    [Parameter(Mandatory=`$true, Position=0)]
-    [string]`$Token
+        # 创建批处理启动脚本（简单可靠）
+        $batchScript = @"
+@echo off
+setlocal
+
+rem hub-agent 启动批处理脚本 v3.2-Ultimate
+rem 参数：%1 = Token
+
+set "TOKEN=%~1"
+set "APP_DIR=C:\Program Files\hub-agent"
+set "LOG_FILE=$LogPath"
+set "BINARY=%APP_DIR%\hub-agent.exe"
+
+rem 确保日志目录存在
+if not exist "$LogDir" mkdir "$LogDir"
+
+rem 记录启动信息
+echo [%date% %time%] [INFO] ======================================= >> "%LOG_FILE%"
+echo [%date% %time%] [INFO] hub-agent starting (v3.2-Ultimate)... >> "%LOG_FILE%"
+echo [%date% %time%] [INFO] Token: %TOKEN:~0,8%... >> "%LOG_FILE%"
+echo [%date% %time%] [INFO] Binary: %BINARY% >> "%LOG_FILE%"
+echo [%date% %time%] [INFO] Log: %LOG_FILE% >> "%LOG_FILE%"
+
+rem 检查二进制文件是否存在
+if not exist "%BINARY%" (
+    echo [%date% %time%] [ERROR] Binary file not found: %BINARY% >> "%LOG_FILE%"
+    exit /b 1
 )
 
-`$ErrorActionPreference = "Continue"
-`$AppName = "hub-agent"
-`$InstallDir = "C:\Program Files\`$AppName"
-`$LogPath = "$LogPath"
-`$MaxLogSizeMB = $MaxLogSizeMB
-`$MaxLogFiles = $MaxLogFiles
-`$BinaryPath = Join-Path `$InstallDir "`$AppName.exe"
+rem 启动主程序
+echo [%date% %time%] [INFO] Starting hub-agent process... >> "%LOG_FILE%"
 
-# 确保日志目录存在
-`$logDir = Split-Path `$LogPath -Parent
-if (-not (Test-Path `$logDir)) {
-    New-Item -ItemType Directory -Path `$logDir -Force | Out-Null
-}
+rem 启动程序并重定向输出到日志
+"%BINARY%" -token "%TOKEN%" >> "%LOG_FILE%" 2>&1
 
-# 日志轮转函数
-function Invoke-LogRotation {
-    if (Test-Path `$LogPath) {
-        `$logFile = Get-Item `$LogPath
-        `$logSizeMB = [math]::Round(`$logFile.Length / 1MB, 2)
-
-        if (`$logSizeMB -gt `$MaxLogSizeMB) {
-            `$logDir = Split-Path `$LogPath
-            `$logName = [System.IO.Path]::GetFileNameWithoutExtension(`$LogPath)
-            `$logExt = [System.IO.Path]::GetExtension(`$LogPath)
-
-            # 轮转现有日志文件
-            for (`$i = `$MaxLogFiles - 1; `$i -gt 0; `$i--) {
-                `$oldFile = Join-Path `$logDir "`$logName.`$i`$logExt"
-                `$newFile = Join-Path `$logDir "`$logName.`$(`$i + 1)`$logExt"
-
-                if (Test-Path `$oldFile) {
-                    if (`$i -eq (`$MaxLogFiles - 1)) {
-                        Remove-Item `$oldFile -Force -ErrorAction SilentlyContinue
-                    } else {
-                        Move-Item `$oldFile `$newFile -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
-
-            # 移动当前日志文件
-            `$firstRotatedFile = Join-Path `$logDir "`$logName.1`$logExt"
-            Move-Item `$LogPath `$firstRotatedFile -Force -ErrorAction SilentlyContinue
-
-            # 写入轮转信息到新日志文件
-            `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            "[`$timestamp] [INFO] Log rotated. Previous log size: `$logSizeMB MB" | Out-File -FilePath `$LogPath -Encoding UTF8
-        }
-    }
-}
-
-# 记录启动信息
-`$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-"[`$timestamp] [INFO] =========================================" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-"[`$timestamp] [INFO] hub-agent starting... (v3.1-Final)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-"[`$timestamp] [INFO] Token: `$(`$Token.Substring(0, 8))..." | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-"[`$timestamp] [INFO] Binary Path: `$BinaryPath" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-"[`$timestamp] [INFO] Log Path: `$LogPath" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-
-# 执行日志轮转检查
-Invoke-LogRotation
-
-# 检查二进制文件是否存在
-if (-not (Test-Path `$BinaryPath)) {
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [ERROR] Binary file not found: `$BinaryPath" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-    exit 1
-}
-
-# 启动主程序并重定向输出到日志
-try {
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [INFO] Starting hub-agent process..." | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-
-    # 使用临时文件来处理输出重定向
-    `$tempOutFile = Join-Path `$env:TEMP "hub-agent-out-`$(Get-Random).tmp"
-    `$tempErrFile = Join-Path `$env:TEMP "hub-agent-err-`$(Get-Random).tmp"
-
-    `$process = Start-Process -FilePath `$BinaryPath -ArgumentList "-token `"`$Token`"" -RedirectStandardOutput `$tempOutFile -RedirectStandardError `$tempErrFile -NoNewWindow -PassThru
-
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [INFO] Process started with PID: `$(`$process.Id)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-
-    # 启动输出监控作业
-    `$outputJob = Start-Job -ScriptBlock {
-        param(`$OutFile, `$ErrFile, `$LogPath)
-        while (`$true) {
-            Start-Sleep 1
-            if (Test-Path `$OutFile) {
-                `$outContent = Get-Content `$OutFile -ErrorAction SilentlyContinue
-                if (`$outContent) {
-                    foreach (`$line in `$outContent) {
-                        `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                        "[`$timestamp] [OUT] `$line" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-                    }
-                    Clear-Content `$OutFile -ErrorAction SilentlyContinue
-                }
-            }
-            if (Test-Path `$ErrFile) {
-                `$errContent = Get-Content `$ErrFile -ErrorAction SilentlyContinue
-                if (`$errContent) {
-                    foreach (`$line in `$errContent) {
-                        `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                        "[`$timestamp] [ERR] `$line" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-                    }
-                    Clear-Content `$ErrFile -ErrorAction SilentlyContinue
-                }
-            }
-        }
-    } -ArgumentList `$tempOutFile, `$tempErrFile, `$LogPath
-
-    # 监控进程，实现日志轮转
-    while (!`$process.HasExited) {
-        Start-Sleep 300  # 每5分钟检查一次日志大小
-        Invoke-LogRotation
-    }
-
-    # 清理
-    Stop-Job `$outputJob -ErrorAction SilentlyContinue
-    Remove-Job `$outputJob -ErrorAction SilentlyContinue
-    Remove-Item `$tempOutFile -ErrorAction SilentlyContinue
-    Remove-Item `$tempErrFile -ErrorAction SilentlyContinue
-
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [WARN] Process exited with code: `$(`$process.ExitCode)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-
-} catch {
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [ERROR] Failed to start hub-agent: `$(`$_.Exception.Message)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-    "[`$timestamp] [ERROR] Exception Details: `$(`$_.Exception.GetType().FullName)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-}
+rem 记录退出信息
+echo [%date% %time%] [WARN] Process exited with code: %ERRORLEVEL% >> "%LOG_FILE%"
 "@
 
-        $wrapperScriptPath = Join-Path $InstallDir "hub-agent-wrapper.ps1"
-        $wrapperScript | Out-File -FilePath $wrapperScriptPath -Encoding UTF8 -Force
+        $batchScriptPath = Join-Path $InstallDir "hub-agent-start.bat"
+        $batchScript | Out-File -FilePath $batchScriptPath -Encoding ASCII -Force
 
         Write-Info "Log configuration completed."
-        Write-Info "Wrapper script created: $wrapperScriptPath"
+        Write-Info "Batch startup script created: $batchScriptPath"
 
-        return $wrapperScriptPath
+        return $batchScriptPath
 
     } catch {
         Write-Error "Failed to initialize logging configuration: $($_.Exception.Message)"
@@ -492,22 +376,22 @@ function Install-Application {
     }
 }
 
-# 创建任务计划程序任务（使用包装脚本）
+# 创建任务计划程序任务（使用批处理脚本）
 function Install-ScheduledTask {
-    param([string]$BinaryPath, [string]$WrapperScriptPath)
+    param([string]$BinaryPath, [string]$BatchScriptPath)
 
-    Write-Step "Creating scheduled task with logging wrapper..."
+    Write-Step "Creating scheduled task with batch launcher..."
 
     try {
         Write-Info "Configuring scheduled task: $TaskName"
-        Write-Info "Wrapper script: $WrapperScriptPath"
+        Write-Info "Batch script: $BatchScriptPath"
         Write-Info "Token: $($Token.Substring(0, 8))..."
 
         # 创建任务触发器 - 系统启动时
         $trigger = New-ScheduledTaskTrigger -AtStartup
 
-        # 创建任务动作 - 运行包装脚本（使用位置参数）
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WrapperScriptPath`" `"$Token`""
+        # 创建任务动作 - 运行批处理脚本
+        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$BatchScriptPath`" `"$Token`""
 
         # 创建任务主体设置 - 以SYSTEM权限运行
         $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -516,9 +400,9 @@ function Install-ScheduledTask {
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 
         # 注册任务
-        Register-ScheduledTask -TaskName $TaskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "$AppName Service (Task Scheduler + Logging v3.1-Final)"
+        Register-ScheduledTask -TaskName $TaskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "$AppName Service (Task Scheduler + Batch Logging v3.2)"
 
-        Write-Info "Scheduled task created successfully with logging support."
+        Write-Info "Scheduled task created successfully with batch logging."
         return $true
 
     } catch {
@@ -570,10 +454,10 @@ function Test-Installation {
             return $false
         }
 
-        # 检查包装脚本
-        $wrapperPath = Join-Path $InstallDir "hub-agent-wrapper.ps1"
-        if (-not (Test-Path $wrapperPath)) {
-            Write-Warn "Wrapper script does not exist: $wrapperPath"
+        # 检查批处理脚本
+        $batchPath = Join-Path $InstallDir "hub-agent-start.bat"
+        if (-not (Test-Path $batchPath)) {
+            Write-Warn "Batch script does not exist: $batchPath"
             return $false
         }
 
@@ -607,11 +491,11 @@ function Test-Installation {
                 if (Test-Path $LogPath) {
                     Write-Host "Recent log entries:" -ForegroundColor Yellow
                     Get-Content $LogPath -Tail 10 | ForEach-Object {
-                        if ($_ -match "\[ERROR\]") {
+                        if ($_ -match "ERROR") {
                             Write-Host "  $_" -ForegroundColor Red
-                        } elseif ($_ -match "\[WARN\]") {
+                        } elseif ($_ -match "WARN") {
                             Write-Host "  $_" -ForegroundColor Yellow
-                        } elseif ($_ -match "v3.1-Final") {
+                        } elseif ($_ -match "v3.2-Ultimate") {
                             Write-Host "  $_" -ForegroundColor Green
                         } else {
                             Write-Host "  $_" -ForegroundColor White
@@ -631,7 +515,7 @@ function Test-Installation {
 function Show-ManagementCommands {
     Write-Host ""
     Write-Host "===============================================" -ForegroundColor Green
-    Write-Host "    ✅ 安装成功！管理命令" -ForegroundColor Green
+    Write-Host "    ✅ 安装完成！(v3.2-Ultimate)" -ForegroundColor Green
     Write-Host "===============================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "📋 任务管理命令:" -ForegroundColor Yellow
@@ -648,14 +532,13 @@ function Show-ManagementCommands {
     Write-Host "  查看日志: Get-Content `"$LogPath`" -Tail 50" -ForegroundColor White
     Write-Host "  实时日志: Get-Content `"$LogPath`" -Wait -Tail 10" -ForegroundColor White
     Write-Host "  搜索错误: Get-Content `"$LogPath`" | Select-String `"ERROR`"" -ForegroundColor White
-    Write-Host "  日志文件: Get-ChildItem `"$LogDir`" -Filter *.log" -ForegroundColor White
+    Write-Host "  搜索今日: Get-Content `"$LogPath`" | Select-String `"$(Get-Date -Format 'yyyy-MM-dd')`"" -ForegroundColor White
     Write-Host ""
     Write-Host "⚙️ 安装信息:" -ForegroundColor Yellow
     Write-Host "  安装路径: $InstallDir" -ForegroundColor White
+    Write-Host "  启动脚本: $InstallDir\hub-agent-start.bat" -ForegroundColor White
     Write-Host "  任务名称: $TaskName" -ForegroundColor White
     Write-Host "  日志路径: $LogPath" -ForegroundColor White
-    Write-Host "  日志大小限制: ${MaxLogSizeMB}MB" -ForegroundColor White
-    Write-Host "  日志文件数量: $MaxLogFiles" -ForegroundColor White
     Write-Host "  开机启动: ✓ 已启用" -ForegroundColor Green
     Write-Host "  运行权限: SYSTEM" -ForegroundColor White
     Write-Host "  故障重启: ✓ 已启用 (5分钟后重试，最多3次)" -ForegroundColor Green
@@ -674,6 +557,25 @@ function Show-ManagementCommands {
         $logInfo = Get-Item $LogPath
         Write-Host "  📄 日志文件: $([math]::Round($logInfo.Length/1KB, 2)) KB" -ForegroundColor Green
         Write-Host "  🕒 最后更新: $($logInfo.LastWriteTime)" -ForegroundColor White
+
+        # 显示最新几行日志
+        Write-Host ""
+        Write-Host "📋 最新日志:" -ForegroundColor Cyan
+        try {
+            Get-Content $LogPath -Tail 5 | ForEach-Object {
+                if ($_ -match "ERROR") {
+                    Write-Host "  $_" -ForegroundColor Red
+                } elseif ($_ -match "WARN") {
+                    Write-Host "  $_" -ForegroundColor Yellow
+                } elseif ($_ -match "v3.2-Ultimate") {
+                    Write-Host "  $_" -ForegroundColor Green
+                } else {
+                    Write-Host "  $_" -ForegroundColor White
+                }
+            }
+        } catch {
+            Write-Host "  无法读取日志内容" -ForegroundColor Red
+        }
     } else {
         Write-Host "  📄 日志文件: 未找到" -ForegroundColor Red
     }
@@ -705,14 +607,14 @@ function Main {
         Remove-ExistingInstallation
         $binaryPath = Install-Application
 
-        # 初始化日志配置并创建包装脚本
-        $wrapperScriptPath = Initialize-LoggingConfiguration
-        if (-not $wrapperScriptPath) {
+        # 初始化日志配置并创建批处理脚本
+        $batchScriptPath = Initialize-LoggingConfiguration
+        if (-not $batchScriptPath) {
             Write-Error "Failed to initialize logging configuration"
             return
         }
 
-        if (-not (Install-ScheduledTask -BinaryPath $binaryPath -WrapperScriptPath $wrapperScriptPath)) {
+        if (-not (Install-ScheduledTask -BinaryPath $binaryPath -BatchScriptPath $batchScriptPath)) {
             Write-Error "Failed to create scheduled task"
             return
         }
@@ -740,11 +642,11 @@ function Main {
                 Write-Host ""
                 Write-Host "📋 最新日志:" -ForegroundColor Yellow
                 Get-Content $LogPath -Tail 10 | ForEach-Object {
-                    if ($_ -match "\[ERROR\]") {
+                    if ($_ -match "ERROR") {
                         Write-Host "  $_" -ForegroundColor Red
-                    } elseif ($_ -match "\[WARN\]") {
+                    } elseif ($_ -match "WARN") {
                         Write-Host "  $_" -ForegroundColor Yellow
-                    } elseif ($_ -match "v3.1-Final") {
+                    } elseif ($_ -match "v3.2-Ultimate") {
                         Write-Host "  $_" -ForegroundColor Green
                     } else {
                         Write-Host "  $_" -ForegroundColor White
