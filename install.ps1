@@ -391,41 +391,46 @@ function Install-ScheduledTask {
     }
 }
 
+# 安全写入日志函数
+function Write-SafeLog {
+    param([string]$Message, [string]$LogFile)
+
+    $maxRetries = 3
+    $retryCount = 0
+
+    while ($retryCount -lt $maxRetries) {
+        try {
+            $Message | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction Stop
+            break
+        } catch {
+            $retryCount++
+            if ($retryCount -lt $maxRetries) {
+                Start-Sleep -Milliseconds (200 * $retryCount)  # 递增延迟
+            }
+        }
+    }
+}
+
 # 启动任务
 function Start-HubAgentTask {
     Write-Step "Starting task..."
 
     try {
         Start-ScheduledTask -TaskName $TaskName
-        Start-Sleep 3
+        Start-Sleep 5  # 增加等待时间让进程完全启动
 
         $task = Get-ScheduledTask -TaskName $TaskName
         $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
 
         if ($process) {
             Write-Info "Task started successfully, process is running (PID: $($process.Id))"
-
-            # 写入启动成功日志
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            "[$timestamp] [INFO] Process started successfully (PID: $($process.Id))" | Out-File -FilePath $LogPath -Append -Encoding UTF8
-
             return $true
         } else {
             Write-Warn "Task started but process not found"
-
-            # 写入警告日志
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            "[$timestamp] [WARN] Task started but process not found" | Out-File -FilePath $LogPath -Append -Encoding UTF8
-
             return $false
         }
     } catch {
         Write-Warn "Failed to start task: $($_.Exception.Message)"
-
-        # 写入错误日志
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        "[$timestamp] [ERROR] Failed to start task: $($_.Exception.Message)" | Out-File -FilePath $LogPath -Append -Encoding UTF8
-
         return $false
     }
 }
@@ -580,9 +585,10 @@ function Main {
         $endTime = Get-Date
         $duration = $endTime - $startTime
 
-        # 写入安装完成日志
+        # 写入安装完成日志 - 使用安全写入
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        "[$timestamp] [INFO] Installation completed. Duration: $([math]::Round($duration.TotalSeconds, 1)) seconds" | Out-File -FilePath $LogPath -Append -Encoding UTF8
+        $completionMessage = "[$timestamp] [INFO] Installation completed. Duration: $([math]::Round($duration.TotalSeconds, 1)) seconds"
+        Write-SafeLog -Message $completionMessage -LogFile $LogPath
 
         if ($installSuccess) {
             Write-Host ""
@@ -600,11 +606,10 @@ function Main {
         Write-Host "❌ Installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "Please check the error message and try again, or contact technical support." -ForegroundColor Yellow
 
-        # 写入错误日志
-        if (Test-Path $LogPath) {
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            "[$timestamp] [ERROR] Installation failed: $($_.Exception.Message)" | Out-File -FilePath $LogPath -Append -Encoding UTF8
-        }
+        # 写入错误日志 - 使用安全写入
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $errorMessage = "[$timestamp] [ERROR] Installation failed: $($_.Exception.Message)"
+        Write-SafeLog -Message $errorMessage -LogFile $LogPath
 
         exit 1
     }
