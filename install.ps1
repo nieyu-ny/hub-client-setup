@@ -199,7 +199,10 @@ function Initialize-LoggingConfiguration {
         # 创建包装脚本
         $wrapperScript = @"
 # hub-agent 启动包装脚本 - 支持日志轮转
-param([string]`$Token)
+param(
+    [Parameter(Mandatory=`$true)]
+    [string]`$Token
+)
 
 `$ErrorActionPreference = "Continue"
 `$AppName = "hub-agent"
