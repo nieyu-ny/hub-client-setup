@@ -1,26 +1,25 @@
 <#
 .SYNOPSIS
-    hub-agent Windows平台一键安装脚本（任务计划程序版本 - 终极稳定版 v3.2）
+    hub-agent Windows平台一键安装脚本（任务计划程序版本）
 .DESCRIPTION
     从预编译二进制文件安装hub-agent，使用任务计划程序替代Windows服务
     支持命令行参数和环境变量两种方式传递Token
-    使用批处理文件实现简单可靠的日志记录
+    解决了服务启动超时问题
 .PARAMETER Token
     应用程序token (可选，如果未提供将从环境变量读取)
-.PARAMETER LogPath
-    日志文件路径 (可选，默认: C:\ProgramData\hub-agent\logs\hub-agent.log)
 .PARAMETER Force
     强制重新安装，覆盖已存在的任务
 .EXAMPLE
-    $env:Token = "your_token"; iwr -useb https://url/install.ps1 | iex
+    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token"
+.EXAMPLE
+    $env:Token = "your_token"; PowerShell -ExecutionPolicy Bypass -File install.ps1
+.EXAMPLE
+    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -Force
 #>
 
 param(
     [Parameter(Mandatory=$false)]
     [string]$Token,
-
-    [Parameter(Mandatory=$false)]
-    [string]$LogPath = "C:\ProgramData\hub-agent\logs\hub-agent.log",
 
     [Parameter(Mandatory=$false)]
     [switch]$Force
@@ -45,7 +44,9 @@ if ([string]::IsNullOrEmpty($Token)) {
 if ([string]::IsNullOrEmpty($Token)) {
     Write-Host "[ERROR] Token参数是必需的。请通过 -Token 参数或 `$env:Token 环境变量提供。" -ForegroundColor Red
     Write-Host "用法示例:" -ForegroundColor Yellow
-    Write-Host "  `$env:Token = `"your_token`"; iwr -useb https://url/install.ps1 | iex" -ForegroundColor White
+    Write-Host "  PowerShell -File install.ps1 -Token `"your_token`"" -ForegroundColor White
+    Write-Host "  或者:" -ForegroundColor Yellow
+    Write-Host "  `$env:Token = `"your_token`"; PowerShell -File install.ps1" -ForegroundColor White
     exit 1
 }
 
@@ -55,13 +56,6 @@ $BinaryBaseUrl = "https://github.com/nieyu-ny/hub-client-setup/raw/master"
 $InstallDir = "C:\Program Files\$AppName"
 $TaskName = "HubAgent"
 $BinaryName = "hub-agent-windows.exe"
-
-# 处理日志路径
-$LogDir = Split-Path $LogPath -Parent
-if (-not $LogDir) {
-    $LogDir = "C:\ProgramData\hub-agent\logs"
-    $LogPath = Join-Path $LogDir "hub-agent.log"
-}
 
 # 全局错误处理
 $ErrorActionPreference = "Stop"
@@ -82,8 +76,8 @@ function Show-InstallInfo {
     $arch = Get-Architecture
 
     Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "    $AppName Windows Installer v3.2-Ultimate" -ForegroundColor Cyan
-    Write-Host "    (Task Scheduler + Simple Logging)" -ForegroundColor Cyan
+    Write-Host "    $AppName Windows One-Click Installer v3.0" -ForegroundColor Cyan
+    Write-Host "    (Task Scheduler Version)" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Installation Info:"
@@ -92,13 +86,13 @@ function Show-InstallInfo {
     Write-Host "  Binary File: $BinaryName"
     Write-Host "  Download URL: $BinaryBaseUrl"
     Write-Host "  Token: $($Token.Substring(0, [Math]::Min(8, $Token.Length)))..."
-    Write-Host "  Installation Method: Task Scheduler + Batch Script"
-    Write-Host "  Log Path: $LogPath"
+    Write-Host "  Installation Method: Task Scheduler"
     if ($Force) {
         Write-Host "  Force Reinstall: Yes"
     }
     Write-Host ""
 }
+
 
 # 检查管理员权限
 function Test-AdminRights {
@@ -115,7 +109,7 @@ function Request-AdminElevation {
         try {
             if ($MyInvocation.MyCommand.Path) {
                 $scriptPath = $MyInvocation.MyCommand.Path
-                $arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" -Token `"$Token`" -LogPath `"$LogPath`""
+                $arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" -Token `"$Token`""
                 if ($Force) {
                     $arguments += " -Force"
                 }
@@ -136,6 +130,7 @@ function Request-AdminElevation {
         }
     }
 }
+
 
 # 检测架构
 function Get-Architecture {
@@ -159,76 +154,6 @@ function Test-NetworkConnection {
     } catch {
         Write-Error "Failed to connect to the download server: $testUrl, Error: $($_.Exception.Message)"
         return $false
-    }
-}
-
-# 创建日志配置和启动批处理文件
-function Initialize-LoggingConfiguration {
-    Write-Step "Initializing logging configuration..."
-
-    try {
-        # 创建日志目录
-        if (-not (Test-Path $LogDir)) {
-            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-            Write-Info "Created log directory: $LogDir"
-        }
-
-        # 设置日志目录权限
-        $acl = Get-Acl $LogDir
-        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $acl.SetAccessRule($accessRule)
-        Set-Acl -Path $LogDir -AclObject $acl
-
-        # 创建批处理启动脚本（简单可靠）
-        $batchScript = @"
-@echo off
-setlocal
-
-rem hub-agent 启动批处理脚本 v3.2-Ultimate
-rem 参数：%1 = Token
-
-set "TOKEN=%~1"
-set "APP_DIR=C:\Program Files\hub-agent"
-set "LOG_FILE=$LogPath"
-set "BINARY=%APP_DIR%\hub-agent.exe"
-
-rem 确保日志目录存在
-if not exist "$LogDir" mkdir "$LogDir"
-
-rem 记录启动信息
-echo [%date% %time%] [INFO] ======================================= >> "%LOG_FILE%"
-echo [%date% %time%] [INFO] hub-agent starting (v3.2-Ultimate)... >> "%LOG_FILE%"
-echo [%date% %time%] [INFO] Token: %TOKEN:~0,8%... >> "%LOG_FILE%"
-echo [%date% %time%] [INFO] Binary: %BINARY% >> "%LOG_FILE%"
-echo [%date% %time%] [INFO] Log: %LOG_FILE% >> "%LOG_FILE%"
-
-rem 检查二进制文件是否存在
-if not exist "%BINARY%" (
-    echo [%date% %time%] [ERROR] Binary file not found: %BINARY% >> "%LOG_FILE%"
-    exit /b 1
-)
-
-rem 启动主程序
-echo [%date% %time%] [INFO] Starting hub-agent process... >> "%LOG_FILE%"
-
-rem 启动程序并重定向输出到日志
-"%BINARY%" -token "%TOKEN%" >> "%LOG_FILE%" 2>&1
-
-rem 记录退出信息
-echo [%date% %time%] [WARN] Process exited with code: %ERRORLEVEL% >> "%LOG_FILE%"
-"@
-
-        $batchScriptPath = Join-Path $InstallDir "hub-agent-start.bat"
-        $batchScript | Out-File -FilePath $batchScriptPath -Encoding ASCII -Force
-
-        Write-Info "Log configuration completed."
-        Write-Info "Batch startup script created: $batchScriptPath"
-
-        return $batchScriptPath
-
-    } catch {
-        Write-Error "Failed to initialize logging configuration: $($_.Exception.Message)"
-        return $null
     }
 }
 
@@ -376,22 +301,22 @@ function Install-Application {
     }
 }
 
-# 创建任务计划程序任务（使用批处理脚本）
+# 创建任务计划程序任务
 function Install-ScheduledTask {
-    param([string]$BinaryPath, [string]$BatchScriptPath)
+    param([string]$BinaryPath)
 
-    Write-Step "Creating scheduled task with batch launcher..."
+    Write-Step "Creating scheduled task..."
 
     try {
         Write-Info "Configuring scheduled task: $TaskName"
-        Write-Info "Batch script: $BatchScriptPath"
+        Write-Info "Executable path: $BinaryPath"
         Write-Info "Token: $($Token.Substring(0, 8))..."
 
         # 创建任务触发器 - 系统启动时
         $trigger = New-ScheduledTaskTrigger -AtStartup
 
-        # 创建任务动作 - 运行批处理脚本
-        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$BatchScriptPath`" `"$Token`""
+        # 创建任务动作
+        $action = New-ScheduledTaskAction -Execute $BinaryPath -Argument "-token `"$Token`""
 
         # 创建任务主体设置 - 以SYSTEM权限运行
         $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -400,9 +325,9 @@ function Install-ScheduledTask {
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 
         # 注册任务
-        Register-ScheduledTask -TaskName $TaskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "$AppName Service (Task Scheduler + Batch Logging v3.2)"
+        Register-ScheduledTask -TaskName $TaskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "$AppName Service (Managed by Task Scheduler)"
 
-        Write-Info "Scheduled task created successfully with batch logging."
+        Write-Info "Scheduled task created successfully."
         return $true
 
     } catch {
@@ -417,7 +342,7 @@ function Start-HubAgentTask {
 
     try {
         Start-ScheduledTask -TaskName $TaskName
-        Start-Sleep 5
+        Start-Sleep 3
 
         $task = Get-ScheduledTask -TaskName $TaskName
         $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
@@ -426,15 +351,8 @@ function Start-HubAgentTask {
             Write-Info "Task started successfully, process is running (PID: $($process.Id))"
             return $true
         } else {
-            Write-Warn "Task started but process not found, checking logs..."
-            Start-Sleep 5
-            $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
-            if ($process) {
-                Write-Info "Process started with delay (PID: $($process.Id))"
-                return $true
-            } else {
-                return $false
-            }
+            Write-Warn "Task started but process not found"
+            return $false
         }
     } catch {
         Write-Warn "Failed to start task: $($_.Exception.Message)"
@@ -454,13 +372,6 @@ function Test-Installation {
             return $false
         }
 
-        # 检查批处理脚本
-        $batchPath = Join-Path $InstallDir "hub-agent-start.bat"
-        if (-not (Test-Path $batchPath)) {
-            Write-Warn "Batch script does not exist: $batchPath"
-            return $false
-        }
-
         # 检查任务
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         Write-Info "Task status: $($task.State)"
@@ -469,39 +380,13 @@ function Test-Installation {
         $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
         if ($process) {
             Write-Info "✓ Process is running normally (PID: $($process.Id))"
-
-            # 检查日志文件
-            Start-Sleep 3
-            if (Test-Path $LogPath) {
-                $logInfo = Get-Item $LogPath
-                Write-Info "✓ Log file created: $LogPath"
-                Write-Info "  Log file size: $([math]::Round($logInfo.Length/1KB, 2)) KB"
-                Write-Info "  Last modified: $($logInfo.LastWriteTime)"
-            } else {
-                Write-Warn "⚠ Log file not found: $LogPath"
-            }
-
             return $true
         } else {
             Write-Warn "⚠ Process is not running, attempting to start..."
             if (Start-HubAgentTask) {
                 return $true
             } else {
-                Write-Warn "Failed to start task, checking logs for errors..."
-                if (Test-Path $LogPath) {
-                    Write-Host "Recent log entries:" -ForegroundColor Yellow
-                    Get-Content $LogPath -Tail 10 | ForEach-Object {
-                        if ($_ -match "ERROR") {
-                            Write-Host "  $_" -ForegroundColor Red
-                        } elseif ($_ -match "WARN") {
-                            Write-Host "  $_" -ForegroundColor Yellow
-                        } elseif ($_ -match "v3.2-Ultimate") {
-                            Write-Host "  $_" -ForegroundColor Green
-                        } else {
-                            Write-Host "  $_" -ForegroundColor White
-                        }
-                    }
-                }
+                Write-Warn "Failed to start task"
                 return $false
             }
         }
@@ -515,77 +400,36 @@ function Test-Installation {
 function Show-ManagementCommands {
     Write-Host ""
     Write-Host "===============================================" -ForegroundColor Green
-    Write-Host "    ✅ 安装完成！(v3.2-Ultimate)" -ForegroundColor Green
+    Write-Host "    Installation Complete! Management Commands" -ForegroundColor Green
     Write-Host "===============================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "📋 任务管理命令:" -ForegroundColor Yellow
-    Write-Host "  检查状态: Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor White
-    Write-Host "  启动任务: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
-    Write-Host "  停止进程: Stop-Process -Name $AppName -Force" -ForegroundColor White
-    Write-Host "  重启服务: Stop-Process -Name $AppName -Force; Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "Task Management Commands:" -ForegroundColor Yellow
+    Write-Host "  Check status: Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor White
+    Write-Host "  Start task: Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Stop process: Stop-Process -Name $AppName -Force" -ForegroundColor White
+    Write-Host "  Restart service: Stop-Process -Name $AppName -Force; Start-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Disable task: Disable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
+    Write-Host "  Enable task: Enable-ScheduledTask -TaskName $TaskName" -ForegroundColor White
     Write-Host ""
-    Write-Host "📊 进程管理命令:" -ForegroundColor Yellow
-    Write-Host "  查看进程: Get-Process -Name $AppName" -ForegroundColor White
-    Write-Host "  进程详情: Get-Process -Name $AppName | Format-List *" -ForegroundColor White
+    Write-Host "Process Management Commands:" -ForegroundColor Yellow
+    Write-Host "  View process: Get-Process -Name $AppName" -ForegroundColor White
+    Write-Host "  Process details: Get-Process -Name $AppName | Format-List *" -ForegroundColor White
     Write-Host ""
-    Write-Host "📝 日志管理命令:" -ForegroundColor Yellow
-    Write-Host "  查看日志: Get-Content `"$LogPath`" -Tail 50" -ForegroundColor White
-    Write-Host "  实时日志: Get-Content `"$LogPath`" -Wait -Tail 10" -ForegroundColor White
-    Write-Host "  搜索错误: Get-Content `"$LogPath`" | Select-String `"ERROR`"" -ForegroundColor White
-    Write-Host "  搜索今日: Get-Content `"$LogPath`" | Select-String `"$(Get-Date -Format 'yyyy-MM-dd')`"" -ForegroundColor White
+    Write-Host "Log Query Commands:" -ForegroundColor Yellow
+    Write-Host "  Task logs: Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'} -MaxEvents 10 | Where-Object {`$_.Message -match '$TaskName'}" -ForegroundColor White
+    Write-Host "  System logs: Get-EventLog -LogName System -Newest 10 | Where-Object {`$_.Message -match '$AppName'}" -ForegroundColor White
     Write-Host ""
-    Write-Host "⚙️ 安装信息:" -ForegroundColor Yellow
-    Write-Host "  安装路径: $InstallDir" -ForegroundColor White
-    Write-Host "  启动脚本: $InstallDir\hub-agent-start.bat" -ForegroundColor White
-    Write-Host "  任务名称: $TaskName" -ForegroundColor White
-    Write-Host "  日志路径: $LogPath" -ForegroundColor White
-    Write-Host "  开机启动: ✓ 已启用" -ForegroundColor Green
-    Write-Host "  运行权限: SYSTEM" -ForegroundColor White
-    Write-Host "  故障重启: ✓ 已启用 (5分钟后重试，最多3次)" -ForegroundColor Green
+    Write-Host "Installation Info:" -ForegroundColor Yellow
+    Write-Host "  Install path: $InstallDir" -ForegroundColor White
+    Write-Host "  Task name: $TaskName" -ForegroundColor White
+    Write-Host "  Startup on boot: ✓ Enabled" -ForegroundColor Green
+    Write-Host "  Run as: SYSTEM" -ForegroundColor White
+    Write-Host "  Restart on failure: ✓ Enabled (Retry in 5 minutes, up to 3 times)" -ForegroundColor Green
     Write-Host ""
-
-    # 快速状态检查
-    Write-Host "🔍 当前状态:" -ForegroundColor Cyan
-    $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
-    if ($process) {
-        Write-Host "  ✅ 进程运行正常 (PID: $($process.Id))" -ForegroundColor Green
-    } else {
-        Write-Host "  ❌ 进程未运行" -ForegroundColor Red
-    }
-
-    if (Test-Path $LogPath) {
-        $logInfo = Get-Item $LogPath
-        Write-Host "  📄 日志文件: $([math]::Round($logInfo.Length/1KB, 2)) KB" -ForegroundColor Green
-        Write-Host "  🕒 最后更新: $($logInfo.LastWriteTime)" -ForegroundColor White
-
-        # 显示最新几行日志
-        Write-Host ""
-        Write-Host "📋 最新日志:" -ForegroundColor Cyan
-        try {
-            Get-Content $LogPath -Tail 5 | ForEach-Object {
-                if ($_ -match "ERROR") {
-                    Write-Host "  $_" -ForegroundColor Red
-                } elseif ($_ -match "WARN") {
-                    Write-Host "  $_" -ForegroundColor Yellow
-                } elseif ($_ -match "v3.2-Ultimate") {
-                    Write-Host "  $_" -ForegroundColor Green
-                } else {
-                    Write-Host "  $_" -ForegroundColor White
-                }
-            }
-        } catch {
-            Write-Host "  无法读取日志内容" -ForegroundColor Red
-        }
-    } else {
-        Write-Host "  📄 日志文件: 未找到" -ForegroundColor Red
-    }
-
-    Write-Host ""
-    Write-Host "🗑️ 完全卸载命令:" -ForegroundColor Red
+    Write-Host "Full Uninstall Commands:" -ForegroundColor Red
     Write-Host "  Stop-Process -Name $AppName -Force -ErrorAction SilentlyContinue" -ForegroundColor White
     Write-Host "  Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false" -ForegroundColor White
     Write-Host "  Remove-Item `"$InstallDir`" -Recurse -Force" -ForegroundColor White
-    Write-Host "  Remove-Item `"$LogDir`" -Recurse -Force" -ForegroundColor White
     Write-Host ""
 }
 
@@ -607,21 +451,14 @@ function Main {
         Remove-ExistingInstallation
         $binaryPath = Install-Application
 
-        # 初始化日志配置并创建批处理脚本
-        $batchScriptPath = Initialize-LoggingConfiguration
-        if (-not $batchScriptPath) {
-            Write-Error "Failed to initialize logging configuration"
-            return
-        }
-
-        if (-not (Install-ScheduledTask -BinaryPath $binaryPath -BatchScriptPath $batchScriptPath)) {
+        if (-not (Install-ScheduledTask -BinaryPath $binaryPath)) {
             Write-Error "Failed to create scheduled task"
             return
         }
 
         # Start task
         if (-not (Start-HubAgentTask)) {
-            Write-Warn "Task failed to start, but installation is complete. Please check the task configuration and logs."
+            Write-Warn "Task failed to start, but installation is complete. Please manually check the task configuration."
         }
 
         # Verify installation
@@ -632,33 +469,18 @@ function Main {
 
         if ($installSuccess) {
             Write-Host ""
-            Write-Host "🎉 安装完成！" -ForegroundColor Green
-            Write-Host "⏱️ 总耗时: $([math]::Round($duration.TotalSeconds, 1)) 秒" -ForegroundColor Cyan
+            Write-Host "🎉 Installation completed successfully!" -ForegroundColor Green
+            Write-Host "Total time elapsed: $([math]::Round($duration.TotalSeconds, 1)) seconds" -ForegroundColor Cyan
             Show-ManagementCommands
         } else {
             Write-Host ""
-            Write-Host "⚠️ 安装可能存在问题，请检查任务状态和日志。" -ForegroundColor Yellow
-            if (Test-Path $LogPath) {
-                Write-Host ""
-                Write-Host "📋 最新日志:" -ForegroundColor Yellow
-                Get-Content $LogPath -Tail 10 | ForEach-Object {
-                    if ($_ -match "ERROR") {
-                        Write-Host "  $_" -ForegroundColor Red
-                    } elseif ($_ -match "WARN") {
-                        Write-Host "  $_" -ForegroundColor Yellow
-                    } elseif ($_ -match "v3.2-Ultimate") {
-                        Write-Host "  $_" -ForegroundColor Green
-                    } else {
-                        Write-Host "  $_" -ForegroundColor White
-                    }
-                }
-            }
+            Write-Host "⚠ There may be issues with the installation. Please check the task status and logs." -ForegroundColor Yellow
         }
 
     } catch {
         Write-Host ""
-        Write-Host "❌ 安装失败: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "💡 请检查错误信息并重试，或联系技术支持。" -ForegroundColor Yellow
+        Write-Host "❌ Installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Please check the error message and try again, or contact technical support." -ForegroundColor Yellow
         exit 1
     }
 }
