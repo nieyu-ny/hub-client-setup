@@ -16,6 +16,10 @@
     PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token"
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -UserMode
+.EXAMPLE
+    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -SystemMode
+.EXAMPLE
+    PowerShell -ExecutionPolicy Bypass -File install.ps1 -Token "your_token" -NoElevation
 #>
 
 param(
@@ -29,7 +33,13 @@ param(
     [switch]$Force,
 
     [Parameter(Mandatory=$false)]
-    [switch]$UserMode
+    [switch]$UserMode,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$SystemMode,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoElevation
 )
 
 # 设置控制台编码为UTF-8
@@ -86,7 +96,31 @@ function Test-AdminRights {
 # 获取安装配置（根据权限级别）
 function Get-InstallConfig {
     $isAdmin = Test-AdminRights
-    $useUserMode = $UserMode -or -not $isAdmin
+
+    # 决定使用哪种模式
+    $useUserMode = $false
+
+    if ($SystemMode -and -not $isAdmin) {
+        Write-Warn "指定了系统模式但没有管理员权限，将尝试提权..."
+        $global:Force = $Force
+        if (Request-AdminElevation -Force) {
+            $isAdmin = $true
+        } else {
+            Write-Info "提权失败或取消，将使用用户模式..."
+            $useUserMode = $true
+        }
+    } elseif ($UserMode) {
+        $useUserMode = $true
+    } elseif (-not $isAdmin -and -not $NoElevation) {
+        # 普通用户权限且未禁用提权，询问用户选择
+        if (-not (Request-AdminElevation)) {
+            $useUserMode = $true
+        } else {
+            $isAdmin = $true
+        }
+    } elseif (-not $isAdmin) {
+        $useUserMode = $true
+    }
 
     if ($useUserMode) {
         # 用户模式配置
@@ -396,6 +430,86 @@ function Install-Application {
     }
 }
 
+# 创建启动脚本和包装器
+function New-StartupWrapper {
+    param($BinaryPath, $Config)
+
+    Write-Step "Creating startup wrapper script..."
+
+    try {
+        # 创建启动脚本目录
+        $wrapperDir = Join-Path $Config.InstallDir "scripts"
+        if (-not (Test-Path $wrapperDir)) {
+            New-Item -ItemType Directory -Path $wrapperDir -Force | Out-Null
+        }
+
+        # 创建 PowerShell 启动脚本
+        $wrapperScript = Join-Path $wrapperDir "start-hub-agent.ps1"
+        $startupScript = @"
+# hub-agent startup wrapper script
+# This script runs hub-agent in the background with logging
+
+`$ErrorActionPreference = "SilentlyContinue"
+
+# 设置工作目录
+Set-Location "$($Config.InstallDir)"
+
+# 设置日志路径
+`$LogPath = "$($Config.LogPath)"
+`$LogDir = Split-Path `$LogPath -Parent
+
+# 确保日志目录存在
+if (-not (Test-Path `$LogDir)) {
+    New-Item -ItemType Directory -Path `$LogDir -Force | Out-Null
+}
+
+# 写入启动日志
+`$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+"[`$timestamp] [INFO] Starting hub-agent ($($Config.Mode) mode)..." | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+
+try {
+    # 启动 hub-agent 并重定向输出到日志文件
+    `$processArgs = @{
+        FilePath = "$BinaryPath"
+        ArgumentList = @("-token", "$Token")
+        NoNewWindow = `$true
+        PassThru = `$true
+        RedirectStandardOutput = `$LogPath
+        RedirectStandardError = `$LogPath
+    }
+
+    `$process = Start-Process @processArgs
+
+    # 记录进程启动信息
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "[`$timestamp] [INFO] hub-agent started successfully (PID: `$(`$process.Id))" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+
+    # 等待进程结束
+    `$process.WaitForExit()
+
+    # 记录进程结束信息
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "[`$timestamp] [INFO] hub-agent process ended (Exit Code: `$(`$process.ExitCode))" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+
+} catch {
+    # 记录错误信息
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "[`$timestamp] [ERROR] Failed to start hub-agent: `$(`$_.Exception.Message)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+}
+"@
+
+        # 写入启动脚本
+        $startupScript | Out-File -FilePath $wrapperScript -Encoding UTF8 -Force
+
+        Write-Info "Created startup wrapper: $wrapperScript"
+        return $wrapperScript
+
+    } catch {
+        Write-Warn "Failed to create startup wrapper: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 # 创建任务计划程序任务（支持用户和系统模式）
 function Install-ScheduledTask {
     param($BinaryPath, $Config)
@@ -408,6 +522,12 @@ function Install-ScheduledTask {
         Write-Info "Run as: $($Config.Principal)"
         Write-Info "Log output: $($Config.LogPath)"
 
+        # 创建启动包装器脚本
+        $wrapperScript = New-StartupWrapper -BinaryPath $BinaryPath -Config $Config
+        if (-not $wrapperScript) {
+            throw "Failed to create startup wrapper script"
+        }
+
         # 创建任务触发器 - 用户登录时（用户模式）或系统启动时（系统模式）
         if ($Config.Mode -eq "User") {
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -415,12 +535,8 @@ function Install-ScheduledTask {
             $trigger = New-ScheduledTaskTrigger -AtStartup
         }
 
-        # 创建带日志重定向的启动命令
-        $logCommand = "cmd.exe"
-        $logArgs = "/c `"cd /d `"$($Config.InstallDir)`" && echo [%date% %time%] [INFO] Starting hub-agent ($($Config.Mode) mode)... >> `"$($Config.LogPath)`" && `"$BinaryPath`" -token `"$Token`" >> `"$($Config.LogPath)`" 2>&1`""
-
-        # 创建任务动作
-        $action = New-ScheduledTaskAction -Execute $logCommand -Argument $logArgs
+        # 创建任务动作 - 使用 PowerShell 运行包装器脚本（隐藏窗口）
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrapperScript`""
 
         # 创建任务主体设置
         if ($Config.Mode -eq "User") {
@@ -429,8 +545,8 @@ function Install-ScheduledTask {
             $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
         }
 
-        # 创建任务设置
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+        # 创建任务设置 - 重要：设置为隐藏运行
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -Hidden
 
         # 设置任务路径
         $taskPath = if ($Config.Mode -eq "User") { "\" } else { $Config.TaskPath }
@@ -438,7 +554,7 @@ function Install-ScheduledTask {
         # 注册任务
         Register-ScheduledTask -TaskName $Config.TaskName -TaskPath $taskPath -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description $Config.Description
 
-        Write-Info "Scheduled task created successfully in $($Config.Mode) mode."
+        Write-Info "Scheduled task created successfully in $($Config.Mode) mode (Hidden)."
         return $true
 
     } catch {
@@ -563,6 +679,8 @@ function Show-ManagementCommands {
     Write-Host "  Unregister-ScheduledTask -TaskName '$($Config.TaskName)' -Confirm:`$false" -ForegroundColor White
     Write-Host "  Remove-Item `"$($Config.InstallDir)`" -Recurse -Force" -ForegroundColor White
     Write-Host "  Remove-Item `"$($Config.LogDir)`" -Recurse -Force" -ForegroundColor White
+    Write-Host ""
+    Write-Host "💡 Note: The application now runs completely in the background without any visible windows." -ForegroundColor Green
     Write-Host ""
 }
 
