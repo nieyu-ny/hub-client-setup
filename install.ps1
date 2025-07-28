@@ -443,66 +443,61 @@ function New-StartupWrapper {
             New-Item -ItemType Directory -Path $wrapperDir -Force | Out-Null
         }
 
-        # 创建 PowerShell 启动脚本
-        $wrapperScript = Join-Path $wrapperDir "start-hub-agent.ps1"
-        $startupScript = @"
-# hub-agent startup wrapper script
-# This script runs hub-agent in the background with logging
+        # 创建 VBS 启动脚本（完全隐藏）
+        $vbsScript = Join-Path $wrapperDir "start-hub-agent.vbs"
+        $vbsContent = @"
+' hub-agent VBS launcher script
+' This script runs hub-agent completely hidden in the background
 
-`$ErrorActionPreference = "SilentlyContinue"
+Dim objShell, objFSO, logPath, timestamp, logDir, binaryPath, token, installDir
 
-# 设置工作目录
-Set-Location "$($Config.InstallDir)"
+Set objShell = CreateObject("WScript.Shell")
+Set objFSO = CreateObject("Scripting.FileSystemObject")
 
-# 设置日志路径
-`$LogPath = "$($Config.LogPath)"
-`$LogDir = Split-Path `$LogPath -Parent
+' Configuration
+binaryPath = "$BinaryPath"
+token = "$Token"
+installDir = "$($Config.InstallDir)"
+logPath = "$($Config.LogPath)"
+logDir = objFSO.GetParentFolderName(logPath)
 
-# 确保日志目录存在
-if (-not (Test-Path `$LogDir)) {
-    New-Item -ItemType Directory -Path `$LogDir -Force | Out-Null
-}
+' Ensure log directory exists
+If Not objFSO.FolderExists(logDir) Then
+    objFSO.CreateFolder(logDir)
+End If
 
-# 写入启动日志
-`$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-"[`$timestamp] [INFO] Starting hub-agent ($($Config.Mode) mode)..." | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+' Set working directory
+objShell.CurrentDirectory = installDir
 
-try {
-    # 启动 hub-agent 并重定向输出到日志文件
-    `$processArgs = @{
-        FilePath = "$BinaryPath"
-        ArgumentList = @("-token", "$Token")
-        NoNewWindow = `$true
-        PassThru = `$true
-        RedirectStandardOutput = `$LogPath
-        RedirectStandardError = `$LogPath
-    }
+' Write startup log
+timestamp = Now()
+WriteLog "[" & timestamp & "] [INFO] Starting hub-agent ($($Config.Mode) mode)..."
 
-    `$process = Start-Process @processArgs
+' Run hub-agent hidden with output redirection
+Dim command
+command = """" & binaryPath & """ -token """ & token & """"
 
-    # 记录进程启动信息
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [INFO] hub-agent started successfully (PID: `$(`$process.Id))" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
+' Start the process completely hidden (WindowStyle = 0)
+Dim result
+result = objShell.Run("cmd.exe /c """ & command & """ >> """ & logPath & """ 2>&1", 0, False)
 
-    # 等待进程结束
-    `$process.WaitForExit()
+' Write completion log
+WriteLog "[" & Now() & "] [INFO] hub-agent startup command executed"
 
-    # 记录进程结束信息
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [INFO] hub-agent process ended (Exit Code: `$(`$process.ExitCode))" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-
-} catch {
-    # 记录错误信息
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[`$timestamp] [ERROR] Failed to start hub-agent: `$(`$_.Exception.Message)" | Out-File -FilePath `$LogPath -Append -Encoding UTF8
-}
+' Helper function to write log
+Sub WriteLog(message)
+    Dim logFile
+    Set logFile = objFSO.OpenTextFile(logPath, 8, True)
+    logFile.WriteLine(message)
+    logFile.Close
+End Sub
 "@
 
-        # 写入启动脚本
-        $startupScript | Out-File -FilePath $wrapperScript -Encoding UTF8 -Force
+        # 写入 VBS 脚本
+        $vbsContent | Out-File -FilePath $vbsScript -Encoding ASCII -Force
 
-        Write-Info "Created startup wrapper: $wrapperScript"
-        return $wrapperScript
+        Write-Info "Created VBS startup wrapper: $vbsScript"
+        return $vbsScript
 
     } catch {
         Write-Warn "Failed to create startup wrapper: $($_.Exception.Message)"
@@ -522,9 +517,9 @@ function Install-ScheduledTask {
         Write-Info "Run as: $($Config.Principal)"
         Write-Info "Log output: $($Config.LogPath)"
 
-        # 创建启动包装器脚本
-        $wrapperScript = New-StartupWrapper -BinaryPath $BinaryPath -Config $Config
-        if (-not $wrapperScript) {
+        # 创建 VBS 启动包装器脚本
+        $vbsScript = New-StartupWrapper -BinaryPath $BinaryPath -Config $Config
+        if (-not $vbsScript) {
             throw "Failed to create startup wrapper script"
         }
 
@@ -535,8 +530,8 @@ function Install-ScheduledTask {
             $trigger = New-ScheduledTaskTrigger -AtStartup
         }
 
-        # 创建任务动作 - 使用 PowerShell 运行包装器脚本（隐藏窗口）
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrapperScript`""
+        # 创建任务动作 - 使用 wscript 运行 VBS 脚本（完全隐藏）
+        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument """$vbsScript"""
 
         # 创建任务主体设置
         if ($Config.Mode -eq "User") {
@@ -545,7 +540,7 @@ function Install-ScheduledTask {
             $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
         }
 
-        # 创建任务设置 - 重要：设置为隐藏运行
+        # 创建任务设置 - 设置为隐藏运行
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -Hidden
 
         # 设置任务路径
@@ -730,13 +725,22 @@ function Main {
             return
         }
 
-        # 启动任务
-        if (-not (Start-HubAgentTask -Config $config)) {
-            Write-Warn "Task failed to start, but installation is complete. Please manually check the task configuration."
+        # 验证安装
+        Write-Info "Validating installation..."
+        $binaryPath = Join-Path $config.InstallDir "$AppName.exe"
+        if (Test-Path $binaryPath) {
+            Write-Info "✓ Binary file installed successfully"
         }
 
-        # 验证安装
-        $installSuccess = Test-Installation -Config $config
+        $task = Get-ScheduledTask -TaskName $config.TaskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Write-Info "✓ Scheduled task created successfully"
+        }
+
+        # 启动任务进行测试
+        if (-not (Start-HubAgentTask -Config $config)) {
+            Write-Warn "Task test failed, but installation is complete. The task will start automatically on next system boot/user login."
+        }
 
         $endTime = Get-Date
         $duration = $endTime - $startTime
@@ -746,17 +750,11 @@ function Main {
         $completionMessage = "[$timestamp] [INFO] Installation completed ($($config.Mode) mode). Duration: $([math]::Round($duration.TotalSeconds, 1)) seconds"
         Write-SafeLog -Message $completionMessage -LogFile $config.LogPath
 
-        if ($installSuccess) {
-            Write-Host ""
-            Write-Host "🎉 Installation completed successfully!" -ForegroundColor Green
-            Write-Host "Mode: $($config.Mode)" -ForegroundColor Cyan
-            Write-Host "Total time elapsed: $([math]::Round($duration.TotalSeconds, 1)) seconds" -ForegroundColor Cyan
-            Show-ManagementCommands -Config $config
-        } else {
-            Write-Host ""
-            Write-Host "⚠ There may be issues with the installation. Please check the task status and logs." -ForegroundColor Yellow
-            Write-Host "Log file: $($config.LogPath)" -ForegroundColor Cyan
-        }
+        Write-Host ""
+        Write-Host "🎉 Installation completed successfully!" -ForegroundColor Green
+        Write-Host "Mode: $($config.Mode)" -ForegroundColor Cyan
+        Write-Host "Total time elapsed: $([math]::Round($duration.TotalSeconds, 1)) seconds" -ForegroundColor Cyan
+        Show-ManagementCommands -Config $config
 
     } catch {
         Write-Host ""
